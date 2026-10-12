@@ -878,6 +878,9 @@ function builderLadder() {
     <button class="lx-fav" data-lx-act="ADDBR" title="Añadir otra rama al paralelo que contiene la selección">${LX_SVG.ADDBR}<span>+ Rama</span></button>
     <span class="lx-fav-sep"></span>
     <button class="lx-fav lx-fav-del" data-lx-act="DEL" title="Borrar elemento seleccionado (Supr)"><svg class="lx-g" viewBox="0 0 30 28" width="30" height="28"><line x1="9" y1="7" x2="21" y2="21"/><line x1="21" y1="7" x2="9" y2="21"/></svg><span>Borrar</span></button>
+    <span class="lx-fav-sep"></span>
+    <button class="lx-fav" data-lx-act="UNDO" title="Deshacer (Ctrl+Z)"${_lxHist.undo.length ? '' : ' disabled'}><svg class="lx-g" viewBox="0 0 30 28" width="30" height="28"><path d="M10 9 L5 14 L10 19"/><path d="M5 14 H19 a6 6 0 0 1 0 12 H15"/></svg><span>Deshacer</span></button>
+    <button class="lx-fav" data-lx-act="REDO" title="Rehacer (Ctrl+Y)"${_lxHist.redo.length ? '' : ' disabled'}><svg class="lx-g" viewBox="0 0 30 28" width="30" height="28"><path d="M20 9 L25 14 L20 19"/><path d="M25 14 H11 a6 6 0 0 0 0 12 H15"/></svg><span>Rehacer</span></button>
     <span class="lx-fav-spacer"></span>
     ${state.ldDirty && state.compiled ? `<span class="lx-dirty" title="El programa del editor difiere del cargado en la CPU">● Offline ≠ Online — compila para cargar</span>` : ''}
   </div>`;
@@ -894,7 +897,7 @@ function builderLadder() {
 
   return `<div class="ld-builder lx-builder">
 ${favBar}
-<p class="ld-hint">Selecciona un contacto o un tramo de cable y pulsa una instrucción (o <kbd>F2</kbd> NA · <kbd>F3</kbd> NC · <kbd>F7</kbd> bobina · <kbd>Shift</kbd>+<kbd>F8</kbd> rama · <kbd>Supr</kbd> borrar · <kbd>←</kbd><kbd>→</kbd> moverse). También puedes arrastrar instrucciones y elementos.</p>
+<p class="ld-hint">Selecciona un contacto o un tramo de cable y pulsa una instrucción (o <kbd>F2</kbd> NA · <kbd>F3</kbd> NC · <kbd>F7</kbd> bobina · <kbd>Shift</kbd>+<kbd>F8</kbd> rama · <kbd>Supr</kbd> borrar · <kbd>←</kbd><kbd>→</kbd> moverse · <kbd>Ctrl</kbd>+<kbd>Z</kbd> deshacer). También puedes arrastrar instrucciones y elementos. El programa se guarda solo en este navegador.</p>
 <div class="ld-canvas lx-canvas${lxMonitoring() ? ' lx-monitor' : ''}" tabindex="0">
 ${lxNetsHtml(state.ladderNets, { edit:true, flowOf: lxMonitoring() ? (net => lxFlow(state.cpuNets[state.ladderNets.indexOf(net)] || net)) : null })}
 </div>
@@ -905,7 +908,76 @@ ${hintSection}
 }
 
 // ── Operaciones de edición ─────────────────────────────────────
-function lxTouch() { state.ldDirty = true; state.ladderErrors = null; }
+function lxTouch() { state.ldDirty = true; state.ladderErrors = null; lxCommit(); }
+
+// ── Historial (deshacer/rehacer) y guardado local ─────────────
+// _lxHist.last es el estado ya confirmado; cada commit lo apila en undo.
+const LX_STORE = 'automata-lab-ladder-v1';
+const LX_HIST_MAX = 50;
+const _lxHist = { undo: [], redo: [], last: null };
+function lxSnapshot() { return JSON.stringify(state.ladderNets); }
+function lxResetHistory() { _lxHist.undo = []; _lxHist.redo = []; _lxHist.last = lxSnapshot(); }
+function lxCommit() {
+  const cur = lxSnapshot();
+  if (_lxHist.last !== null && cur !== _lxHist.last) {
+    _lxHist.undo.push(_lxHist.last);
+    if (_lxHist.undo.length > LX_HIST_MAX) _lxHist.undo.shift();
+    _lxHist.redo = [];
+  }
+  _lxHist.last = cur;
+  lxPersist();
+}
+function lxRestore(snap) {
+  state.ladderNets = JSON.parse(snap);
+  _lxHist.last = snap;
+  state.ldSel = null; state.ldDirty = true; state.ladderErrors = null;
+  lxPersist();
+}
+function lxUndo() {
+  if (!_lxHist.undo.length) return false;
+  _lxHist.redo.push(_lxHist.last);
+  lxRestore(_lxHist.undo.pop());
+  return true;
+}
+function lxRedo() {
+  if (!_lxHist.redo.length) return false;
+  _lxHist.undo.push(_lxHist.last);
+  lxRestore(_lxHist.redo.pop());
+  return true;
+}
+
+function lxReadStore() {
+  try { const d = JSON.parse(localStorage.getItem(LX_STORE) || '{}'); return d && typeof d === 'object' ? d : {}; }
+  catch { return {}; }
+}
+function lxPersist() {
+  try {
+    const d = lxReadStore();
+    d.programs = d.programs || {};
+    d.programs[state.scenario] = state.ladderNets;
+    d.tagNames = state.tagNames;
+    localStorage.setItem(LX_STORE, JSON.stringify(d));
+  } catch { /* almacenamiento no disponible: se sigue trabajando en memoria */ }
+}
+function lxForget(scenario) {
+  try {
+    const d = lxReadStore();
+    if (d.programs) delete d.programs[scenario];
+    localStorage.setItem(LX_STORE, JSON.stringify(d));
+  } catch { /* nada que borrar */ }
+}
+// Valida un programa guardado y ajusta el contador de ids para no repetirlos.
+function lxAdopt(nets) {
+  const okSer = n => n && n.t === 'S' && Array.isArray(n.items) && n.items.every(x =>
+    x && (x.t === 'C' || (x.t === 'P' && Array.isArray(x.branches) && x.branches.length && x.branches.every(okSer))));
+  if (!Array.isArray(nets) || !nets.length || !nets.every(n => n && okSer(n.logic) && Array.isArray(n.coils))) return null;
+  let max = 0;
+  const bump = id => { const m = /^[a-z](\d+)$/.exec(id || ''); if (m) max = Math.max(max, +m[1]); };
+  nets.forEach(n => { bump(n.id); lxWalk(n.logic, x => bump(x.id)); n.coils.forEach(o => bump(o.id)); });
+  _lxId = Math.max(_lxId, max);
+  return nets;
+}
+function lxStoredNets(scenario) { return lxAdopt(lxReadStore().programs?.[scenario]); }
 function lxSelNet() {
   if (!state.ladderNets.length) state.ladderNets.push(lxNet());
   const ni = state.ldSel ? Math.min(state.ldSel.ni, state.ladderNets.length - 1) : state.ladderNets.length - 1;
@@ -2027,15 +2099,16 @@ function setupEvents() {
       render(); return;
     }
     const nInp = e.target.closest('.ld-net-inp');
-    if (nInp) { const net = state.ladderNets[+nInp.dataset.netRi]; if (net) net.title = nInp.value; return; }
+    if (nInp) { const net = state.ladderNets[+nInp.dataset.netRi]; if (net) { net.title = nInp.value; lxCommit(); } return; }
     const nCmt = e.target.closest('.lx-net-cmt');
-    if (nCmt) { const net = state.ladderNets[+nCmt.dataset.netCmt]; if (net) net.comment = nCmt.value; return; }
+    if (nCmt) { const net = state.ladderNets[+nCmt.dataset.netCmt]; if (net) { net.comment = nCmt.value; lxCommit(); } return; }
     const inp = e.target.closest('.sym-name-inp');
     if (!inp) return;
     const tag = inp.dataset.tag;
     const val = inp.value.trim().replace(/[^A-Za-z0-9_]/g,'').toUpperCase().slice(0,12);
     inp.value = val;
     if (val) state.tagNames[tag] = val; else delete state.tagNames[tag];
+    lxPersist();
     render();
   });
   const celebEl = document.createElement('div');
@@ -2172,7 +2245,10 @@ function setupEvents() {
     const onOp = e.target.closest('.lx-op-sel') && /^(F2|F3|F7|F8|Delete|Escape)$/.test(k);
     if (e.target.closest('input,textarea,select') && !onOp) return;
     let msg = null, handled = true;
-    if (k === 'F2') lxInsertContact(false);
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && !onOp && (k === 'z' || k === 'Z') && !e.shiftKey) { if (!lxUndo()) msg = 'No hay nada que deshacer.'; }
+    else if (mod && !onOp && (k === 'y' || k === 'Y' || ((k === 'z' || k === 'Z') && e.shiftKey))) { if (!lxRedo()) msg = 'No hay nada que rehacer.'; }
+    else if (k === 'F2') lxInsertContact(false);
     else if (k === 'F3') lxInsertContact(true);
     else if (k === 'F7') lxInsertCoil('=');
     else if (k === 'F8' && e.shiftKey) msg = lxOpenBranch();
@@ -2248,6 +2324,8 @@ function setupEvents() {
       else if (act === 'BRANCH') msg = lxOpenBranch();
       else if (act === 'ADDBR') msg = lxAddBranch();
       else if (act === 'DEL') { if (state.ldSel?.id) lxDeleteSel(); else msg = 'Selecciona el elemento que quieres borrar.'; }
+      else if (act === 'UNDO') { if (!lxUndo()) msg = 'No hay nada que deshacer.'; }
+      else if (act === 'REDO') { if (!lxRedo()) msg = 'No hay nada que rehacer.'; }
       else lxInsertCoil(act);
       if (msg) { state.feedback = msg; state.feedbackType = 'warn'; }
       render();
@@ -2442,7 +2520,7 @@ function setupEvents() {
       // Restore ladder if saved, otherwise clear
       const saved = state.ladderSave[key];
       if (saved) {
-        state.ladderNets = saved.nets;
+        state.ladderNets = lxAdopt(saved.nets) || lxNets(rungs);
         state.cpuNets = saved.cpuNets;
         state.ldDirty = saved.dirty;
         state.ldSel = null;
@@ -2451,13 +2529,15 @@ function setupEvents() {
         state.ladderErrors = null;
         state.feedback = `Proceso: ${sc.label} · Programa restaurado.`;
       } else {
-        state.ladderNets = lxNets(rungs);
+        const stored = lxStoredNets(key);
+        state.ladderNets = stored || lxNets(rungs);
         state.cpuNets = null; state.ldDirty = false; state.ldSel = null;
         state.ladderErrors = null;
         state.compiled = false;
         state.hintIdx = -1; state.hintMsg = '';
-        state.feedback = `Proceso: ${sc.label} · Configura el relé y compila el programa.`;
+        state.feedback = stored ? `Proceso: ${sc.label} · Programa guardado recuperado — compílalo para cargarlo.` : `Proceso: ${sc.label} · Configura el relé y compila el programa.`;
       }
+      lxResetHistory();
       state.feedbackType = 'ok';
       render(); return;
     }
@@ -2508,7 +2588,7 @@ function setupEvents() {
         }
         render(); break;
       }
-      case 'resetPlc': { const _rsc = SCENARIOS[state.scenario]; const _rn = _rsc.rungs || 3; state.compiled = false; state.plcRunning = false; state.plcMonitor = false; state.latch = false; state.systemEnabled = false; state.ladderNets = lxNets(_rn); state.cpuNets = null; state.ldDirty = false; state.ldSel = null; state.forced = {}; state.xrefTag = null; state.plcScanMode = false; state.scanCount = 0; state.ladderErrors = null; state.activeSlot = null; state.inputs = { start: false, stop: false }; state.hintIdx = -1; state.hintMsg = ''; state.timerET = 0; state.timerQ = false; delete state.ladderSave[state.scenario]; state.feedback = 'PLC reiniciado — programa borrado.'; state.feedbackType = 'ok'; render(); break; }
+      case 'resetPlc': { const _rsc = SCENARIOS[state.scenario]; const _rn = _rsc.rungs || 3; state.compiled = false; state.plcRunning = false; state.plcMonitor = false; state.latch = false; state.systemEnabled = false; state.ladderNets = lxNets(_rn); state.cpuNets = null; state.ldDirty = false; state.ldSel = null; state.forced = {}; state.xrefTag = null; state.plcScanMode = false; state.scanCount = 0; state.ladderErrors = null; state.activeSlot = null; state.inputs = { start: false, stop: false }; state.hintIdx = -1; state.hintMsg = ''; state.timerET = 0; state.timerQ = false; delete state.ladderSave[state.scenario]; lxCommit(); lxForget(state.scenario); state.feedback = 'PLC reiniciado — programa borrado (Ctrl+Z para recuperarlo).'; state.feedbackType = 'ok'; render(); break; }
       case 'newFault': {
         const sf = currentFaults();
         const keys = Object.keys(sf);
@@ -2601,7 +2681,12 @@ setInterval(()=>{
   tickTrace(); patchDom();
 },700);
 
-state.ladderNets = lxNets(SCENARIOS[state.scenario].rungs || 3);
+(() => {
+  const d = lxReadStore();
+  if (d.tagNames && typeof d.tagNames === 'object') state.tagNames = d.tagNames;
+  state.ladderNets = lxStoredNets(state.scenario) || lxNets(SCENARIOS[state.scenario].rungs || 3);
+  lxResetHistory();
+})();
 setupEvents();
 window.addEventListener('resize', () => { if (state.view === 'builder') applyCanvasScale(); });
 render();
