@@ -41,7 +41,6 @@ const state = {
   timerPT: 5,
   timerET: 0,
   timerQ: false,
-  activeSlot: null,
   ladderErrors: null,
   trace: Array.from({length: 44}, () => ({level: 0, out: 0})),
   fault: null,
@@ -485,10 +484,11 @@ function positionMarks() {
 }
 
 function missionCheck() {
-  if (!_prevMissions) _prevMissions = { ...state.missions };
   state.missions.wiring = state.wires.supply && state.wires.sensor && state.wires.output;
   if (SCENARIOS[state.scenario].missionRelay(state)) state.missions.relay = true;
   if (state.diagSolved) state.missions.diagnose = true;
+  // Lo que ya se cumple al cargar (p. ej. el lazo viene cableado) no se festeja.
+  if (!_prevMissions) _prevMissions = { ...state.missions };
   for (const key of ['wiring', 'relay', 'program', 'diagnose', 'builder']) {
     if (state.missions[key] && !_prevMissions[key]) showCelebration(key);
     _prevMissions[key] = state.missions[key];
@@ -654,7 +654,6 @@ const lxClone = v => JSON.parse(JSON.stringify(v));
 // Bits escribibles por bobinas → campo de state.
 const LX_BITS = { 'M0.0':'latch', 'Q0.0':'pumpCommand', 'Q0.1':'q01', 'Q0.2':'q02' };
 function lxWriteBit(tag, v) { state[LX_BITS[tag]] = v; }
-const ctcKey  = c => c?.tag ? c.tag + (c.nc ? '/NC' : '') : null;
 const coilKey = o => !o?.tag ? null : o.kind === '=' ? o.tag : `${o.tag}/${o.kind}`;
 const LX_COIL_KINDS = { '=': 'Asignación', S: 'Activar (SET)', R: 'Desactivar (RESET)', TON: 'Temporizador TON', CTU: 'Contador ascendente CTU — cuenta cada flanco de subida; se pone a 0 con -(R)- sobre %C0' };
 const LX_CTC_KINDS = { NO:'Contacto normalmente abierto', NC:'Contacto normalmente cerrado', P:'Flanco de subida (P): conduce un solo ciclo cuando el operando pasa de 0 a 1', N:'Flanco de bajada (N): conduce un solo ciclo cuando el operando pasa de 1 a 0' };
@@ -2815,7 +2814,7 @@ function setupEvents() {
         }
         render(); break;
       }
-      case 'resetPlc': { const _rsc = SCENARIOS[state.scenario]; const _rn = _rsc.rungs || 3; state.compiled = false; state.plcRunning = false; state.plcMonitor = false; state.latch = false; state.systemEnabled = false; state.ladderNets = lxNets(_rn); state.cpuNets = null; state.ldDirty = false; state.ldSel = null; state.forced = {}; state.xrefTag = null; state.plcScanMode = false; state.scanCount = 0; state.ladderErrors = null; state.activeSlot = null; state.inputs = { start: false, stop: false }; state.hintIdx = -1; state.hintMsg = ''; state.timerET = 0; state.timerQ = false; lxResetMem(); delete state.ladderSave[state.scenario]; state.verifyResult = null; lxCommit(); lxForget(state.scenario); state.feedback = 'PLC reiniciado — programa borrado (Ctrl+Z para recuperarlo).'; state.feedbackType = 'ok'; render(); break; }
+      case 'resetPlc': { const _rsc = SCENARIOS[state.scenario]; const _rn = _rsc.rungs || 3; state.compiled = false; state.plcRunning = false; state.plcMonitor = false; state.latch = false; state.systemEnabled = false; state.ladderNets = lxNets(_rn); state.cpuNets = null; state.ldDirty = false; state.ldSel = null; state.forced = {}; state.xrefTag = null; state.plcScanMode = false; state.scanCount = 0; state.ladderErrors = null; state.inputs = { start: false, stop: false }; state.hintIdx = -1; state.hintMsg = ''; state.timerET = 0; state.timerQ = false; lxResetMem(); delete state.ladderSave[state.scenario]; state.verifyResult = null; lxCommit(); lxForget(state.scenario); state.feedback = 'PLC reiniciado — programa borrado (Ctrl+Z para recuperarlo).'; state.feedbackType = 'ok'; render(); break; }
       case 'newFault': {
         const sf = currentFaults();
         const keys = Object.keys(sf);

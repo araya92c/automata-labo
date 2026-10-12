@@ -557,21 +557,8 @@ label { display: grid; gap: 6px; color: #334840; font-weight: 700; font-size: .8
 .toast.ok { background: var(--green-800); color: #c8f7d8; border: 1px solid var(--green-700); }
 .toast.bad { background: #7a1c1c; color: #f7c8c8; border: 1px solid var(--danger); }
 
-/* ── Ladder DnD Builder ──────────────────────────── */
+/* ── Editor LAD: contenedor, pistas y botón de red ───── */
 .ld-builder { display: flex; flex-direction: column; gap: 12px; }
-
-/* Palette */
-.ld-palette { display: flex; gap: 20px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; }
-.ld-pal-sec { display: flex; flex-direction: column; gap: 6px; }
-.ld-pal-lbl { font-size: .65rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
-.ld-pal-row { display: flex; gap: 6px; flex-wrap: wrap; }
-.ld-pal-item { display: flex; flex-direction: column; align-items: center; gap: 0; background: var(--panel); border: 1.5px solid var(--line); border-radius: 8px; padding: 6px 10px; cursor: grab; transition: border-color .12s, box-shadow .12s; user-select: none; color: var(--green-800); }
-.ld-pal-item:hover { border-color: var(--green-700); box-shadow: 0 2px 8px rgba(23,98,77,.18); }
-.ld-pal-item.ld-dragging { opacity: .35; }
-
-/* Symbol text */
-.ld-lbl { font-size: .6rem; font-weight: 700; color: var(--ink); line-height: 1.3; font-family: ui-monospace, monospace; }
-.ld-sub { font-size: .55rem; color: var(--muted); line-height: 1.3; }
 
 /* Hint */
 .ld-hint { margin: 0; font-size: .72rem; color: var(--muted); }
@@ -579,83 +566,9 @@ label { display: grid; gap: 6px; color: #334840; font-weight: 700; font-size: .8
 /* Canvas */
 .ld-canvas { display: flex; flex-direction: column; gap: 6px; overflow-x: auto; }
 /* Network title bar (TIA Portal style) */
-.ld-net-blk { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-.ld-net-bar { display: flex; align-items: center; gap: 8px; background: var(--surface); border-bottom: 1px solid var(--line); padding: 3px 8px; min-height: 26px; }
-.ld-net-num { font: 600 .68rem/1 ui-monospace,monospace; color: var(--muted); white-space: nowrap; flex-shrink: 0; }
+
 .ld-net-inp { flex: 1; min-width: 0; font: .72rem/1 var(--font); color: var(--ink); background: transparent; border: none; padding: 2px 4px; outline: none; }
 .ld-net-inp:focus { background: var(--green-950-10, rgba(11,51,40,.06)); border-radius: 3px; }
-.ld-net-blk > .ld-rung, .ld-net-blk > .ld-rung-par { border-radius: 0; }
-.ld-rung { display: flex; align-items: center; min-height: 58px; }
-.ld-rung-par { min-height: 96px; }
-.ld-rn { width: 14px; font-size: .65rem; color: var(--muted); flex-shrink: 0; text-align: right; padding-right: 3px; }
-.ld-rail { width: 6px; background: var(--green-800); align-self: stretch; border-radius: 3px; flex-shrink: 0; }
-.ld-w  { width: 10px; height: 3px; background: var(--green-700); flex-shrink: 0; align-self: center; }
-.ld-wf { flex: 1; min-width: 8px; height: 3px; background: var(--green-700); align-self: center; }
-
-/* Symbols sized to fit narrow containers */
-.ld-zone svg, .ld-pal-item svg { width: 44px !important; height: 24px !important; display: block; }
-
-/* Drop zones */
-.ld-zone { display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 8px; border: 2px dashed var(--line); min-width: 58px; min-height: 48px; padding: 3px 5px; transition: border-color .14s, background .14s, box-shadow .14s; position: relative; }
-.ld-ph { font-size: .78rem; color: var(--muted); font-family: ui-monospace, monospace; }
-/* Generic contact palette item */
-.ld-pal-gen { opacity: .75; }
-.ld-pal-gen:hover { opacity: 1; }
-/* Inline tag picker inside null contact zone */
-.ld-tag-pick { font: 600 .72rem/1 ui-monospace,monospace; color: var(--ink); background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 3px 4px; max-width: 88px; cursor: pointer; }
-.ld-tag-pick:focus { outline: none; border-color: var(--accent, #1b8f63); }
-.ld-zone.ld-st-empty  { border-color: var(--line); background: var(--surface); }
-.ld-zone.ld-st-filled { border-style: solid; border-color: var(--green-700); background: #f0f8f4; cursor: grab; color: var(--green-800); }
-.ld-zone.ld-st-ok     { border-style: solid; border-color: var(--ok); background: #d4f5e4; color: #0a5a3a; }
-.ld-zone.ld-st-wrong  { border-style: solid; border-color: var(--danger); background: var(--danger-soft); color: var(--danger); }
-.ld-zone.ld-drag-over { border-style: solid; border-color: var(--gold); background: #fff7e0; box-shadow: 0 0 0 3px rgba(214,168,67,.32); }
-
-/* Parallel section */
-.ld-par { display: flex; flex-direction: column; align-self: stretch; border-left: 3px solid var(--green-700); border-right: 3px solid var(--green-700); }
-.ld-par-br { display: flex; align-items: center; flex: 1; }
-
-/* Structure palette items */
-.ld-pal-struct { display: flex; flex-direction: column; align-items: center; gap: 0; background: var(--panel); border: 1.5px solid var(--line); border-radius: 8px; padding: 6px 10px; cursor: grab; transition: border-color .12s, box-shadow .12s; user-select: none; color: var(--green-800); }
-.ld-pal-struct:hover { border-color: var(--green-700); box-shadow: 0 2px 8px rgba(23,98,77,.18); }
-.ld-pal-struct.ld-dragging { opacity: .35; }
-.ld-pal-struct-used { border-style: dashed; opacity: .65; }
-
-/* Empty rung slot */
-.ld-rung-empty { min-height: 44px; }
-.ld-rung-empty-hint { font-size: .7rem; color: var(--muted); opacity: .7; padding: 0 8px; }
-
-/* Per-rung element toolbar (TIA Portal style) */
-.ld-rung-tools { display: flex; align-items: center; gap: 4px; background: var(--surface); border-top: 1px solid var(--line); padding: 4px 8px; flex-wrap: wrap; }
-.ld-tb-grp { display: flex; align-items: center; gap: 2px; }
-.ld-tb-vsep { width: 1px; height: 24px; background: var(--line); flex-shrink: 0; margin: 0 4px; }
-.ld-tb-el { display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel); color: var(--green-800); cursor: pointer; font-size: .6rem; font-weight: 700; font-family: ui-monospace,monospace; transition: border-color .12s, background .12s; user-select: none; line-height: 1.2; }
-.ld-tb-el:hover { border-color: var(--green-700); background: #e8f5f0; }
-.ld-tb-el span { font-size: .58rem; color: var(--muted); margin-top: 1px; }
-.ld-tb-coil.ld-tb-on { border-color: var(--green-700); background: #d4f5e4; color: #0a5a3a; }
-.ld-tb-coil.ld-tb-on span { color: #0a5a3a; }
-.ld-tb-clr { color: var(--muted); margin-left: auto; border-color: transparent; }
-.ld-tb-clr:hover { color: var(--danger); border-color: var(--danger); background: var(--danger-soft); }
-.ld-tb-full { font-size: .6rem; color: var(--muted); padding: 0 6px; font-family: ui-monospace,monospace; }
-
-/* Signal reference legend */
-.ld-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; }
-.ld-leg-item { display: flex; align-items: center; gap: 5px; font-size: .68rem; }
-.ld-leg-item code { font: 700 .7rem/1 ui-monospace,monospace; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 3px; padding: 1px 4px; }
-.ld-leg-item span { color: var(--muted); }
-
-/* Wrong structure indicator on rung */
-.ld-rung-struct-err { outline: 2px solid var(--danger); outline-offset: 2px; border-radius: 6px; }
-
-/* Clear-struct rung number button */
-.ld-rn-clr { width: 22px; font-size: .62rem; color: var(--muted); flex-shrink: 0; text-align: right; padding-right: 2px; background: none; border: none; cursor: pointer; line-height: 1; }
-.ld-rn-clr:hover { color: var(--danger); }
-.ld-rn-clr sup { font-size: .55rem; }
-.ld-rn-del { width: 18px; font-size: .62rem; color: var(--muted); flex-shrink: 0; background: none; border: none; cursor: pointer; line-height: 1; padding: 0 1px; }
-.ld-rn-del:hover { color: var(--danger); }
-.ld-rn-mvg { display: flex; flex-direction: column; align-items: center; gap: 1px; flex-shrink: 0; }
-.ld-rn-mv { width: 16px; height: 13px; font-size: .58rem; color: var(--muted); background: none; border: none; cursor: pointer; padding: 0; line-height: 1; }
-.ld-rn-mv:hover { color: var(--accent); }
-.ld-rn-mv-ph { display: inline-block; width: 16px; height: 13px; }
 
 /* Add rung */
 .ld-add-row { display: flex; justify-content: flex-start; padding: 6px 0 2px; }
@@ -668,7 +581,6 @@ label { display: grid; gap: 6px; color: #334840; font-weight: 700; font-size: .8
 .ld-hint-btn-done { font-size: .78rem; color: var(--muted); padding: 6px 0; }
 .ld-hint-box { background: var(--gold-soft); border: 1px solid #e3cb94; color: #604811; padding: 8px 12px; border-radius: 8px; font-size: .82rem; line-height: 1.45; display: flex; align-items: flex-start; gap: 6px; flex: 1; min-width: 200px; }
 .ld-hint-icon { flex-shrink: 0; }
-.ld-drag-ghost { position: fixed; pointer-events: none; z-index: 9999; opacity: .75; transform: scale(1.08); background: var(--card); border: 2px solid var(--accent); border-radius: 8px; padding: 4px 8px; display: flex; flex-direction: column; align-items: center; gap: 2px; box-shadow: 0 6px 24px rgba(0,0,0,.35); }
 
 /* Symbol table */
 .sym-table { width: 100%; border-collapse: collapse; font-size: .82rem; margin-top: 10px; }
@@ -724,7 +636,6 @@ label { display: grid; gap: 6px; color: #334840; font-weight: 700; font-size: .8
 .xref-mod-s  { color: #1b8f63; }
 .xref-mod-r  { color: #e08020; }
 .xref-mod-ton { color: #3b82f6; }
-
 
 /* ── TIA Portal-inspired Programming Environment ──────────────── */
 .tia-shell.card.panel { padding: 0; overflow: hidden; }
@@ -838,14 +749,6 @@ label { display: grid; gap: 6px; color: #334840; font-weight: 700; font-size: .8
 .tia-vt-hd:hover { background: var(--panel, #fff); }
 .tia-vt-arrow { font-size: .68rem; color: var(--muted, #63746d); }
 .tia-vt-bd { padding: 10px 12px; }
-
-/* Monitor mode live highlighting */
-.ld-live-on {
-  border-color: #22c55e !important;
-  background: rgba(34,197,94,.1) !important;
-  box-shadow: 0 0 0 2px rgba(34,197,94,.3) inset;
-}
-.ld-live-off { opacity: .42; }
 
 /* Responsive: stack on narrow screens */
 @media (max-width: 800px) {
