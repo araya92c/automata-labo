@@ -907,3 +907,20 @@ label { display: grid; gap: 6px; color: #334840; font-weight: 700; font-size: .8
 .lx-chal-done { color: var(--ok); font-weight: 900; }
 .lx-chal-on .lx-chal-done { color: #8fe5c2; }
 .lx-chal-txt { margin: 6px 4px 2px; font-size: .78rem; line-height: 1.5; color: var(--ink); }
+
+/* Programas de ejemplo */
+.lx-fav-on { border-color: var(--line); background: var(--lx-sel); }
+.lx-ex { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+.lx-ex-hd { display: flex; align-items: center; gap: 8px; padding: 5px 10px; background: var(--surface); border-bottom: 1px solid var(--line); border-radius: 6px 6px 0 0; font-weight: 800; font-size: .76rem; }
+.lx-ex-hd span { font-weight: 500; color: var(--muted); font-size: .7rem; flex: 1; }
+.lx-ex-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; padding: 8px; }
+.lx-ex-card { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; background: var(--panel); }
+.lx-ex-t { font-weight: 800; font-size: .8rem; color: var(--ink); }
+.lx-ex-c { font: 700 .6rem/1.2 ui-monospace, monospace; text-transform: uppercase; letter-spacing: .04em; color: var(--green-700); }
+.lx-ex-card p { margin: 2px 0 4px; font-size: .74rem; line-height: 1.45; color: var(--muted); flex: 1; }
+.lx-ex-card .btn { align-self: flex-start; font-size: .74rem; padding: 4px 12px; }
+.lx-ex-confirm { font-size: .72rem; color: #9a6b00; line-height: 1.4; }
+.lx-ex-confirm .btn { margin-top: 4px; }
+.lx-exnote { border: 1px solid #9fd9bc; border-radius: 6px; background: #f1fbf6; }
+.lx-exnote-hd { display: flex; align-items: center; justify-content: space-between; padding: 4px 10px; font-weight: 800; font-size: .74rem; color: #0a5a3a; border-bottom: 1px solid #cdeedd; }
+.lx-exnote p { margin: 6px 10px; font-size: .76rem; line-height: 1.5; }

@@ -36,6 +36,9 @@ const state = {
   ldSel: null,
   verifyResult: null,
   challenge: null,
+  exOpen: false,
+  exConfirm: null,
+  exNote: null,
   ladderSave: {},
   hintIdx: -1,
   hintMsg: '',
@@ -710,6 +713,116 @@ const LX_CHALLENGES = {
     ],
   }],
 };
+// ── Programas de ejemplo ──────────────────────────────────────
+// Enseñan un concepto cada uno; no son las soluciones de los ejercicios.
+// build(): redes con título y comentario; test(): cómo probarlo en el simulador.
+const lxN = (title, comment, items, coils) => { const n = lxNet(); n.title = title; n.comment = comment; n.logic = lxSer(items); n.coils = coils; return n; };
+const lxNm = t => `<b>${lxTagMeta(t).sym || t}</b> (${t})`;
+const lxSlider = () => `la barra <b>Variable de proceso</b> de la izquierda`;
+const LX_EXAMPLES = [
+  {
+    key: 'seal', title: 'Marcha/parada con enclavamiento', concept: 'Autorretención y contacto NC',
+    desc: () => `Al pulsar ${lxNm('I0.0')}, la salida ${lxNm('Q0.0')} se mantiene encendida gracias a su propio contacto en paralelo, hasta pulsar ${lxNm('I0.1')}.`,
+    test: () => `Pulsa <b>▶ Arrancar</b>. Pulsa <b>START</b>: ${lxNm('Q0.0')} queda encendida aunque sueltes el botón. Pulsa <b>STOP</b>: se apaga.`,
+    build: () => [lxN('Motor con autorretención', 'El contacto Q0.0 en paralelo con MARCHA mantiene la salida; PARADA (NC) corta el circuito.',
+      [lxPar([lxSer([lxCtc('I0.0')]), lxSer([lxCtc('Q0.0')])]), lxCtc('I0.1', true)], [lxCoil('=', 'Q0.0')])],
+  },
+  {
+    key: 'setreset', title: 'Set / Reset', concept: 'Bobinas que memorizan',
+    desc: () => `La bobina <b>S</b> enciende ${lxNm('Q0.0')} y la deja encendida; la bobina <b>R</b> la apaga. Es otra forma de enclavar una salida.`,
+    test: () => `Pulsa <b>▶ Arrancar</b>, luego <b>START</b> (enciende) y <b>STOP</b> (apaga). Activa <b>⬤ Monitor</b> para ver qué red conduce en cada momento.`,
+    build: () => [
+      lxN('Encender', 'Set: pone Q0.0 a 1 y la mantiene así aunque MARCHA vuelva a 0.', [lxCtc('I0.0')], [lxCoil('S', 'Q0.0')]),
+      lxN('Apagar', 'Reset: pone Q0.0 a 0.', [lxCtc('I0.1')], [lxCoil('R', 'Q0.0')]),
+    ],
+  },
+  {
+    key: 'nanc', title: 'Contactos NA y NC', concept: 'Contacto abierto vs. cerrado',
+    desc: () => `El mismo sensor ${lxNm('I0.2')} enciende ${lxNm('Q0.1')} con un contacto NA y ${lxNm('Q0.2')} con un contacto NC: siempre está encendida una de las dos.`,
+    test: () => `Pulsa <b>▶ Arrancar</b> y mueve ${lxSlider()}: por debajo de P1 (${state.lowLevel} %) se enciende el piloto ámbar; por encima, el de alarma.`,
+    build: () => [
+      lxN('Contacto NA', 'Conduce cuando la entrada vale 1.', [lxCtc('I0.2')], [lxCoil('=', 'Q0.1')]),
+      lxN('Contacto NC', 'Conduce cuando la entrada vale 0.', [lxCtc('I0.2', true)], [lxCoil('=', 'Q0.2')]),
+    ],
+  },
+  {
+    key: 'toggle', title: 'Telerruptor con flanco P', concept: 'Flanco de subida y lógica XOR',
+    desc: () => `Cada pulsación de ${lxNm('I0.0')} cambia el estado de ${lxNm('Q0.0')}: un toque enciende, el siguiente apaga. El flanco P hace que cada pulsación cuente una sola vez.`,
+    test: () => `Pulsa <b>▶ Arrancar</b> y luego <b>START</b> varias veces: la salida alterna entre encendida y apagada.`,
+    build: () => [
+      lxN('Detectar pulsación', 'M0.0 vale 1 solo en el ciclo en que MARCHA pasa de 0 a 1.', [lxCtc('I0.0', false, 'P')], [lxCoil('=', 'M0.0')]),
+      lxN('Alternar salida', 'Q0.0 = M0.0 XOR Q0.0: con un pulso cambia de estado; sin pulso se mantiene.',
+        [lxPar([lxSer([lxCtc('M0.0'), lxCtc('Q0.0', true)]), lxSer([lxCtc('M0.0', true), lxCtc('Q0.0')])])], [lxCoil('=', 'Q0.0')]),
+    ],
+  },
+  {
+    key: 'ton', title: 'Temporizador TON', concept: 'Retardo a la conexión',
+    desc: () => `Al pulsar ${lxNm('I0.0')} se enciende el piloto ${lxNm('Q0.1')} mientras corre el temporizador; al cumplirse el tiempo se enciende ${lxNm('Q0.0')}.`,
+    test: () => `Pulsa <b>▶ Arrancar</b> y activa <b>Simular proceso</b> (barra izquierda) para que corra el tiempo. Pulsa <b>START</b>: ámbar durante ${SCENARIOS[state.scenario].timerPT || state.timerPT} s y luego la salida. <b>STOP</b> lo reinicia.`,
+    build: () => [
+      lxN('Orden de marcha', 'Set/Reset de la memoria M0.0.', [lxCtc('I0.0')], [lxCoil('S', 'M0.0')]),
+      lxN('Orden de parada', '', [lxCtc('I0.1')], [lxCoil('R', 'M0.0')]),
+      lxN('Temporizador', 'Mientras M0.0 vale 1, el TON cuenta; T0.0 se activa al llegar a PT.', [lxCtc('M0.0')], [lxCoil('TON', 'T0.0')]),
+      lxN('Salida retardada', '', [lxCtc('T0.0')], [lxCoil('=', 'Q0.0')]),
+      lxN('Piloto de espera', 'Ámbar mientras el temporizador está contando.', [lxCtc('M0.0'), lxCtc('T0.0', true)], [lxCoil('=', 'Q0.1')]),
+    ],
+  },
+  {
+    key: 'ctu', title: 'Contador CTU', concept: 'Contar eventos',
+    desc: () => `Cuenta las veces que se activa ${lxNm('I0.3')}. Al llegar a 3 enciende el piloto ${lxNm('Q0.1')}; ${lxNm('I0.0')} pone el conteo a 0.`,
+    test: () => `Pulsa <b>▶ Arrancar</b> y lleva ${state.scenario === 'conveyor' ? 'piezas con <b>📦 Pasar pieza</b>' : `${lxSlider()} por encima de P2 (${state.highLevel} %) y de vuelta abajo`} 3 veces: el CV de la caja CTU sube y al llegar a 3 se enciende el ámbar. <b>START</b> vuelve el conteo a 0.`,
+    build: () => {
+      const ctu = lxCoil('CTU', 'C0'); ctu.pv = 3;
+      return [
+        lxN('Contar', 'CTU suma 1 en cada flanco de subida de su entrada.', [lxCtc('I0.3', false, 'P')], [ctu]),
+        lxN('Reiniciar conteo', '-(R)- sobre %C0 pone CV a 0.', [lxCtc('I0.0')], [lxCoil('R', 'C0')]),
+        lxN('Lote completo', 'El contacto %C0 se activa cuando CV ≥ PV.', [lxCtc('C0')], [lxCoil('=', 'Q0.1')]),
+      ];
+    },
+  },
+];
+// Un ejemplo está disponible si todas sus instrucciones existen en el proceso activo.
+function lxExampleAvailable(ex) {
+  const ctcs = new Set(lxContactTags());
+  const seq = SCENARIOS[state.scenario].controlMode === 'sequence';
+  return ex.build().every(net => {
+    let ok = true;
+    lxWalk(net.logic, n => { if (n.t === 'C' && !ctcs.has(n.tag)) ok = false; });
+    return ok && net.coils.every(o => (o.kind !== 'TON' || seq) && lxCoilTags(o.kind).includes(o.tag));
+  });
+}
+function lxProgramHasContent() { return state.ladderNets.some(n => n.logic.items.length || n.coils.length); }
+function lxLoadExample(key) {
+  const ex = LX_EXAMPLES.find(x => x.key === key);
+  if (!ex || !lxExampleAvailable(ex)) return;
+  state.ladderNets = ex.build();
+  state.ldSel = null;
+  lxTouch();                    // queda en el historial: Ctrl+Z recupera el programa anterior
+  state.ladderErrors = null;
+  state.cpuNets = lxClone(state.ladderNets); state.ldDirty = false; lxResetMem();
+  state.compiled = true; state.plcRunning = false; state.plcScanMode = false; state.latch = false;
+  state.exOpen = false; state.exConfirm = null; state.exNote = key;
+  state.feedback = `Ejemplo «${ex.title}» cargado y compilado — pulsa ▶ Arrancar para probarlo.`; state.feedbackType = 'ok';
+}
+function lxExamplesHtml() {
+  let note = '';
+  const cur = state.exNote && LX_EXAMPLES.find(x => x.key === state.exNote);
+  if (cur) note = `<div class="lx-exnote"><div class="lx-exnote-hd">▶ Cómo probar «${cur.title}»<button class="lx-net-btn" data-ex-note-close title="Cerrar">✕</button></div><p>${cur.test()}</p></div>`;
+  if (!state.exOpen) return note;
+  const list = LX_EXAMPLES.filter(lxExampleAvailable);
+  const has = lxProgramHasContent();
+  return `<div class="lx-ex">
+    <div class="lx-ex-hd">📂 Programas de ejemplo <span>Se cargan ya compilados; pulsa ▶ Arrancar para probarlos.</span><button class="lx-net-btn" data-action="exToggle" title="Cerrar">✕</button></div>
+    <div class="lx-ex-grid">${list.map(ex => `<div class="lx-ex-card">
+      <div class="lx-ex-t">${ex.title}</div><div class="lx-ex-c">${ex.concept}</div>
+      <p>${ex.desc()}</p>
+      ${state.exConfirm === ex.key
+        ? `<div class="lx-ex-confirm">Reemplaza tu programa actual (puedes recuperarlo con Ctrl+Z). <button class="btn primary" data-ex-load="${ex.key}" data-ex-sure="1">Sí, cargar</button> <button class="btn" data-ex-cancel>Cancelar</button></div>`
+        : `<button class="btn" data-ex-load="${ex.key}"${has ? '' : ' data-ex-sure="1"'}>Cargar ejemplo</button>`}
+    </div>`).join('')}</div>
+  </div>${note}`;
+}
+
 function lxProgKey() { return state.challenge ? `${state.scenario}:${state.challenge}` : state.scenario; }
 function lxChallenge(key = lxProgKey()) {
   const [sc, ch] = key.split(':');
@@ -728,6 +841,7 @@ function lxStashProgram() {
 // Carga el programa del proceso/desafío activo (memoria → navegador → vacío). Devuelve 'memory' | 'stored' | null.
 function lxLoadProgram() {
   const key = lxProgKey();
+  state.exNote = null; state.exConfirm = null;
   const saved = state.ladderSave[key];
   let from = null;
   state.ldSel = null; state.ladderErrors = null;
@@ -1059,6 +1173,8 @@ function builderLadder() {
     <span class="lx-fav-sep"></span>
     <button class="lx-fav" data-lx-act="UNDO" title="Deshacer (Ctrl+Z)"${_lxHist.undo.length ? '' : ' disabled'}><svg class="lx-g" viewBox="0 0 30 28" width="30" height="28"><path d="M10 9 L5 14 L10 19"/><path d="M5 14 H19 a6 6 0 0 1 0 12 H15"/></svg><span>Deshacer</span></button>
     <button class="lx-fav" data-lx-act="REDO" title="Rehacer (Ctrl+Y)"${_lxHist.redo.length ? '' : ' disabled'}><svg class="lx-g" viewBox="0 0 30 28" width="30" height="28"><path d="M20 9 L25 14 L20 19"/><path d="M25 14 H11 a6 6 0 0 0 0 12 H15"/></svg><span>Rehacer</span></button>
+    <span class="lx-fav-sep"></span>
+    <button class="lx-fav${state.exOpen ? ' lx-fav-on' : ''}" data-action="exToggle" title="Cargar un programa de ejemplo para probar cómo funciona"><svg class="lx-g" viewBox="0 0 30 28" width="30" height="28"><path d="M4 8 H12 L14 11 H26 V23 H4 Z"/></svg><span>Ejemplos</span></button>
     <span class="lx-fav-spacer"></span>
     ${state.ldDirty && state.compiled ? `<span class="lx-dirty" title="El programa del editor difiere del cargado en la CPU">● Offline ≠ Online — compila para cargar</span>` : ''}
   </div>`;
@@ -1076,6 +1192,7 @@ function builderLadder() {
   return `<div class="ld-builder lx-builder">
 ${lxChallengeBar()}
 ${favBar}
+${lxExamplesHtml()}
 <p class="ld-hint">Selecciona un contacto o un tramo de cable y pulsa una instrucción (o <kbd>F2</kbd> NA · <kbd>F3</kbd> NC · <kbd>F7</kbd> bobina · <kbd>Shift</kbd>+<kbd>F8</kbd> rama · <kbd>Supr</kbd> borrar · <kbd>←</kbd><kbd>→</kbd> moverse · <kbd>Ctrl</kbd>+<kbd>Z</kbd> deshacer). También puedes arrastrar instrucciones y elementos. El programa se guarda solo en este navegador.</p>
 <div class="ld-canvas lx-canvas${lxMonitoring() ? ' lx-monitor' : ''}" tabindex="0">
 ${lxNetsHtml(state.ladderNets, { edit:true, flowOf: lxMonitoring() ? (net => lxFlow(state.cpuNets[state.ladderNets.indexOf(net)] || net)) : null })}
@@ -2786,6 +2903,7 @@ function setupEvents() {
         state.feedbackType = 'ok';
         render(); return;
       }
+      else if (a === 'exToggle') { state.exOpen = !state.exOpen; state.exConfirm = null; render(); return; }
       else if (a === 'passPiece') {
         // Una pieza frente al fotoeléctrico: la señal sube sobre P2 (DETECCIÓN) y vuelve a 0.
         state.level = 90; render();
@@ -2835,6 +2953,15 @@ function setupEvents() {
       state.readings.push({ name: names[pointEl.dataset.point], value, time: new Date().toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) });
       render(); return;
     }
+
+    const exLoadEl = e.target.closest('[data-ex-load]');
+    if (exLoadEl) {
+      if (exLoadEl.dataset.exSure) lxLoadExample(exLoadEl.dataset.exLoad);
+      else state.exConfirm = exLoadEl.dataset.exLoad;
+      render(); return;
+    }
+    if (e.target.closest('[data-ex-cancel]')) { state.exConfirm = null; render(); return; }
+    if (e.target.closest('[data-ex-note-close]')) { state.exNote = null; render(); return; }
 
     const chalEl = e.target.closest('[data-challenge]');
     if (chalEl) {
@@ -2923,7 +3050,7 @@ function setupEvents() {
         }
         render(); break;
       }
-      case 'resetPlc': { const _rn = lxDefaultRungs(); state.compiled = false; state.plcRunning = false; state.plcMonitor = false; state.latch = false; state.systemEnabled = false; state.ladderNets = lxNets(_rn); state.cpuNets = null; state.ldDirty = false; state.ldSel = null; state.forced = {}; state.xrefTag = null; state.plcScanMode = false; state.scanCount = 0; state.ladderErrors = null; state.inputs = { start: false, stop: false }; state.hintIdx = -1; state.hintMsg = ''; state.timerET = 0; state.timerQ = false; lxResetMem(); delete state.ladderSave[lxProgKey()]; state.verifyResult = null; lxCommit(); lxForget(lxProgKey()); state.feedback = 'PLC reiniciado — programa borrado (Ctrl+Z para recuperarlo).'; state.feedbackType = 'ok'; render(); break; }
+      case 'resetPlc': { const _rn = lxDefaultRungs(); state.compiled = false; state.plcRunning = false; state.plcMonitor = false; state.latch = false; state.systemEnabled = false; state.ladderNets = lxNets(_rn); state.cpuNets = null; state.ldDirty = false; state.ldSel = null; state.forced = {}; state.xrefTag = null; state.plcScanMode = false; state.scanCount = 0; state.ladderErrors = null; state.inputs = { start: false, stop: false }; state.hintIdx = -1; state.hintMsg = ''; state.timerET = 0; state.timerQ = false; lxResetMem(); delete state.ladderSave[lxProgKey()]; state.verifyResult = null; state.exNote = null; lxCommit(); lxForget(lxProgKey()); state.feedback = 'PLC reiniciado — programa borrado (Ctrl+Z para recuperarlo).'; state.feedbackType = 'ok'; render(); break; }
       case 'newFault': {
         const sf = currentFaults();
         const keys = Object.keys(sf);
