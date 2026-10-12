@@ -990,3 +990,6 @@ label { display: grid; gap: 6px; color: #334840; font-weight: 700; font-size: .8
 .lx-q-on { color: var(--ok); font-family: ui-monospace, monospace; }
 .lx-q-off { color: var(--muted); font-family: ui-monospace, monospace; }
 .lx-verify-tip { color: var(--muted); font-size: .7rem; }
+.lx-box input.lx-pv { width: 40px; height: auto; margin: 0 0 0 2px; font: 700 .66rem/1.2 ui-monospace, monospace; color: var(--ink); border: 1px solid var(--line); border-radius: 3px; padding: 0 2px; background: var(--panel); }
+.lx-box input.lx-pv:focus { outline: none; border-color: var(--lx-sel-bd); }
+.sym-cv { color: var(--muted); font-family: ui-monospace, monospace; }

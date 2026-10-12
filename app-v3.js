@@ -14,6 +14,7 @@ const state = {
   pumpCommand: false,
   q01: false,
   q02: false,
+  lxMem: { e:{}, eo:{}, cv:0, pcu:false },
   output: false,
   drainOpen: false,
   manualPump: false,
@@ -446,19 +447,13 @@ function updateLogic() {
     state.output = state.pumpCommand && effectiveOutputWire();
   } else {
     if (!state.compiled || (!state.plcRunning && !state.plcScanMode)) {
-      if (!state.plcScanMode) { state.latch = false; state.pumpCommand = false; state.q01 = false; state.q02 = false; }
+      if (!state.plcScanMode) { state.latch = false; state.pumpCommand = false; state.q01 = false; state.q02 = false; lxResetMem(); }
     } else {
       // Imagen de proceso: M0.0 y Q0.x conservan su valor entre ciclos;
       // ( ) escribe el RLO en cada ciclo, S/R solo cuando el RLO es 1.
-      for (const net of state.cpuNets || []) {
-        const on = evaluateNet(net);
-        for (const o of net.coils) {
-          if (!LX_BITS[o.tag]) continue;
-          if (o.kind === '=') lxWriteBit(o.tag, on);
-          else if (o.kind === 'S') { if (on) lxWriteBit(o.tag, true); }
-          else if (o.kind === 'R') { if (on) lxWriteBit(o.tag, false); }
-        }
-      }
+      const m = lxScan(state.cpuNets || [], lxRuntimeMem(), lxRuntimeIn);
+      state.latch = m.M; state.pumpCommand = m.q['Q0.0']; state.q01 = m.q['Q0.1']; state.q02 = m.q['Q0.2'];
+      state.lxMem.cv = m.cv; state.lxMem.pcu = m.pcu;
       for (const t of Object.keys(LX_BITS)) if (t in state.forced) lxWriteBit(t, state.forced[t]);
     }
     state.output = state.pumpCommand && effectiveOutputWire();
@@ -650,7 +645,7 @@ let _lxId = 0;
 const lxId = p => `${p}${++_lxId}`;
 const lxSer  = (items = []) => ({ t:'S', id:lxId('s'), items });
 const lxPar  = branches => ({ t:'P', id:lxId('p'), branches });
-const lxCtc  = (tag = null, nc = false) => ({ t:'C', id:lxId('c'), tag, nc });
+const lxCtc  = (tag = null, nc = false, edge) => edge ? { t:'C', id:lxId('c'), tag, nc:false, edge } : { t:'C', id:lxId('c'), tag, nc };
 const lxCoil = (kind = '=', tag = null) => ({ t:'O', id:lxId('o'), kind, tag });
 const lxNet  = () => ({ id:lxId('n'), title:'', comment:'', logic:lxSer(), coils:[] });
 const lxNets = n => Array.from({ length:n }, lxNet);
@@ -661,7 +656,9 @@ const LX_BITS = { 'M0.0':'latch', 'Q0.0':'pumpCommand', 'Q0.1':'q01', 'Q0.2':'q0
 function lxWriteBit(tag, v) { state[LX_BITS[tag]] = v; }
 const ctcKey  = c => c?.tag ? c.tag + (c.nc ? '/NC' : '') : null;
 const coilKey = o => !o?.tag ? null : o.kind === '=' ? o.tag : `${o.tag}/${o.kind}`;
-const LX_COIL_KINDS = { '=': 'Asignación', S: 'Activar (SET)', R: 'Desactivar (RESET)', TON: 'Temporizador TON' };
+const LX_COIL_KINDS = { '=': 'Asignación', S: 'Activar (SET)', R: 'Desactivar (RESET)', TON: 'Temporizador TON', CTU: 'Contador ascendente CTU — cuenta cada flanco de subida; se pone a 0 con -(R)- sobre %C0' };
+const LX_CTC_KINDS = { NO:'Contacto normalmente abierto', NC:'Contacto normalmente cerrado', P:'Flanco de subida (P): conduce un solo ciclo cuando el operando pasa de 0 a 1', N:'Flanco de bajada (N): conduce un solo ciclo cuando el operando pasa de 1 a 0' };
+const lxCtcKind = c => c.edge || (c.nc ? 'NC' : 'NO');
 
 function lxFromLegacy(r) {
   const c = t => t ? lxCtc(t.replace('/NC', ''), t.endsWith('/NC')) : lxCtc();
@@ -728,18 +725,85 @@ function lxNormalize(ser) {
   }
 }
 
-function lxEval(node) {
-  if (node.t === 'C') return evaluateContact(ctcKey(node));
-  if (node.t === 'S') return node.items.every(lxEval);
-  return node.branches.some(lxEval);
+// ── Núcleo del ciclo de scan (lo usan el PLC en vivo y Verificar) ──
+// m = imagen de proceso: { M, TQ, q:{'Q0.0'..}, e:{id: valor anterior del operando},
+//     eo:{id: salida del flanco en el último scan}, cv, pcu (CU anterior), pv, cvMax }
+const LX_CV_MAX = 999;
+function lxRead(m, inVal, tag) {
+  if (tag === 'M0.0') return m.M;
+  if (tag === 'T0.0') return m.TQ;
+  if (tag === 'C0') return m.cv >= m.pv;
+  if (tag in m.q) return m.q[tag];
+  return !!inVal(tag);
 }
+// Evaluación sin efectos (monitor, habilitación del TON): los flancos devuelven su último resultado.
+function lxEvalWith(node, m, inVal) {
+  if (node.t === 'C') {
+    if (!node.tag) return false;
+    if (node.edge) return !!m.eo[node.id];
+    const v = lxRead(m, inVal, node.tag);
+    return node.nc ? !v : v;
+  }
+  if (node.t === 'S') return node.items.every(n => lxEvalWith(n, m, inVal));
+  return node.branches.some(b => lxEvalWith(b, m, inVal));
+}
+// Ejecuta un ciclo sobre `m` (lo modifica). Se evalúan todos los contactos, sin
+// cortocircuito, para que la memoria de flanco se actualice en cada ciclo.
+function lxScan(nets, m, inVal) {
+  const ev = n => {
+    if (n.t === 'C') {
+      if (!n.tag) return false;
+      const v = lxRead(m, inVal, n.tag);
+      if (n.edge) {
+        const prev = !!m.e[n.id];
+        m.e[n.id] = v;
+        return (m.eo[n.id] = n.edge === 'P' ? v && !prev : !v && prev);
+      }
+      return n.nc ? !v : v;
+    }
+    if (n.t === 'S') return n.items.map(ev).every(Boolean);
+    return n.branches.map(ev).some(Boolean);
+  };
+  for (const net of nets) {
+    if (!net.coils.length) continue;
+    const on = ev(net.logic);
+    for (const o of net.coils) {
+      if (o.kind === 'CTU') { if (on && !m.pcu) m.cv = Math.min(m.cv + 1, m.cvMax); m.pcu = on; continue; }
+      if (o.tag === 'C0') { if (o.kind === 'R' && on) m.cv = 0; continue; }
+      if (!LX_BITS[o.tag]) continue;
+      const v = o.kind === '=' ? on : o.kind === 'S' ? (on ? true : null) : o.kind === 'R' ? (on ? false : null) : null;
+      if (v === null) continue;
+      if (o.tag === 'M0.0') m.M = v; else m.q[o.tag] = v;
+    }
+  }
+  return m;
+}
+function lxCtrPV(nets) {
+  for (const n of nets || []) for (const o of n.coils) if (o.kind === 'CTU') return o.pv || 3;
+  return 3;
+}
+function lxRuntimeIn(tag) {
+  if (tag in state.forced) return state.forced[tag];
+  return { 'I0.0':state.inputs.start, 'I0.1':state.inputs.stop, 'I0.2':state.levelLow, 'I0.3':state.levelHigh }[tag];
+}
+// Imagen de proceso del PLC en vivo, armada desde state (los bits forzados mandan).
+function lxRuntimeMem() {
+  const f = t => (t in state.forced ? state.forced[t] : null);
+  const pick = (t, v) => f(t) ?? v;
+  return { M:pick('M0.0', state.latch), TQ:state.timerQ,
+    q:{ 'Q0.0':pick('Q0.0', state.pumpCommand), 'Q0.1':pick('Q0.1', state.q01), 'Q0.2':pick('Q0.2', state.q02) },
+    e:state.lxMem.e, eo:state.lxMem.eo, cv:state.lxMem.cv, pcu:state.lxMem.pcu, pv:lxCtrPV(state.cpuNets), cvMax:LX_CV_MAX };
+}
+function lxResetMem() { state.lxMem = { e:{}, eo:{}, cv:0, pcu:false }; }
+
+function lxEval(node) { return lxEvalWith(node, lxRuntimeMem(), lxRuntimeIn); }
 function evaluateNet(net) { return !!net && net.coils.length > 0 && lxEval(net.logic); }
 
 // Flujo de corriente para el monitoreo: clave → energizado.
 function lxFlow(net) {
   const f = {};
   const run = (node, pin) => {
-    if (node.t === 'C') { const closed = evaluateContact(ctcKey(node)); f[node.id] = closed; return pin && closed; }
+    if (node.t === 'C') { const closed = lxEval(node); f[node.id] = closed; return pin && closed; }
     if (node.t === 'S') {
       let p = pin;
       node.items.forEach((it, i) => { f[`${node.id}:${i}`] = p; p = run(it, p); });
@@ -758,20 +822,25 @@ function lxFlow(net) {
 
 function lxTagMeta(tag) {
   const sc = SCENARIOS[state.scenario];
-  const io = { 'I0.0':sc.io.i00, 'I0.1':sc.io.i01, 'I0.2':sc.io.i02, 'I0.3':sc.io.i03, 'M0.0':'MEMORIA', 'T0.0':'TEMPORIZADOR', 'Q0.0':sc.io.q00, 'Q0.1':'ÁMBAR', 'Q0.2':'ALARMA' };
+  const io = { 'I0.0':sc.io.i00, 'I0.1':sc.io.i01, 'I0.2':sc.io.i02, 'I0.3':sc.io.i03, 'M0.0':'MEMORIA', 'T0.0':'TEMPORIZADOR', 'Q0.0':sc.io.q00, 'Q0.1':'ÁMBAR', 'Q0.2':'ALARMA', 'C0':'CONTADOR' };
   return { sym: state.tagNames[tag] || io[tag] || '', addr: tag };
 }
 function lxContactTags() {
-  const q = ['Q0.0','Q0.1','Q0.2'];
+  const q = ['Q0.0','Q0.1','Q0.2','C0'];
   return SCENARIOS[state.scenario].controlMode === 'sequence' ? ['I0.0','I0.1','M0.0','T0.0', ...q] : ['I0.0','I0.1','I0.2','I0.3','M0.0', ...q];
 }
-function lxCoilTags(kind) { return kind === 'TON' ? ['T0.0'] : ['Q0.0','Q0.1','Q0.2','M0.0']; }
-function lxCoilKinds() { return SCENARIOS[state.scenario].controlMode === 'sequence' ? ['=','S','R','TON'] : ['=','S','R']; }
+function lxCoilTags(kind) {
+  if (kind === 'TON') return ['T0.0'];
+  if (kind === 'CTU') return ['C0'];
+  return kind === 'R' ? ['Q0.0','Q0.1','Q0.2','M0.0','C0'] : ['Q0.0','Q0.1','Q0.2','M0.0'];
+}
 
 const LX_SVG = {
   NO:  `<svg class="lx-g" viewBox="0 0 30 28" width="30" height="28" aria-hidden="true"><line x1="0" y1="14" x2="8" y2="14"/><line x1="8" y1="3" x2="8" y2="25"/><line x1="22" y1="3" x2="22" y2="25"/><line x1="22" y1="14" x2="30" y2="14"/></svg>`,
   NC:  `<svg class="lx-g" viewBox="0 0 30 28" width="30" height="28" aria-hidden="true"><line x1="0" y1="14" x2="8" y2="14"/><line x1="8" y1="3" x2="8" y2="25"/><line x1="22" y1="3" x2="22" y2="25"/><line x1="22" y1="14" x2="30" y2="14"/><line x1="9" y1="24" x2="21" y2="4"/></svg>`,
   coil: l => `<svg class="lx-g" viewBox="0 0 34 28" width="34" height="28" aria-hidden="true"><line x1="0" y1="14" x2="6" y2="14"/><path d="M11 4 Q5 14 11 24" fill="none"/><path d="M23 4 Q29 14 23 24" fill="none"/><line x1="28" y1="14" x2="34" y2="14"/>${l ? `<text x="17" y="18.5" text-anchor="middle">${l}</text>` : ''}</svg>`,
+  P:   `<svg class="lx-g" viewBox="0 0 30 28" width="30" height="28" aria-hidden="true"><line x1="0" y1="14" x2="8" y2="14"/><line x1="8" y1="3" x2="8" y2="25"/><line x1="22" y1="3" x2="22" y2="25"/><line x1="22" y1="14" x2="30" y2="14"/><text x="15" y="18" text-anchor="middle">P</text></svg>`,
+  N:   `<svg class="lx-g" viewBox="0 0 30 28" width="30" height="28" aria-hidden="true"><line x1="0" y1="14" x2="8" y2="14"/><line x1="8" y1="3" x2="8" y2="25"/><line x1="22" y1="3" x2="22" y2="25"/><line x1="22" y1="14" x2="30" y2="14"/><text x="15" y="18" text-anchor="middle">N</text></svg>`,
   BR:  `<svg class="lx-g" viewBox="0 0 30 28" width="30" height="28" aria-hidden="true"><line x1="0" y1="8" x2="30" y2="8"/><line x1="6" y1="8" x2="6" y2="22"/><line x1="6" y1="22" x2="24" y2="22"/><line x1="24" y1="22" x2="24" y2="8"/></svg>`,
   ADDBR: `<svg class="lx-g" viewBox="0 0 30 28" width="30" height="28" aria-hidden="true"><line x1="0" y1="6" x2="30" y2="6"/><line x1="6" y1="6" x2="6" y2="24"/><line x1="24" y1="6" x2="24" y2="24"/><line x1="6" y1="15" x2="24" y2="15"/><line x1="6" y1="24" x2="24" y2="24" stroke-dasharray="3 2"/></svg>`,
 };
@@ -794,16 +863,19 @@ function lxNetsHtml(nets, opts = {}) {
       const o = options.map(t => `<option value="${t}"${t === node.tag ? ' selected' : ''}>%${t}${lxTagMeta(t).sym ? ` "${lxTagMeta(t).sym}"` : ''}</option>`).join('');
       return `<span class="lx-sym">${meta.sym ? `"${meta.sym}"` : '&nbsp;'}</span><span class="lx-op-wrap"><span class="lx-op${empty ? ' lx-op-empty' : ''}">${empty ? '&lt;??.?&gt;' : '%' + node.tag}</span><select class="lx-op-sel" data-op-ni="${ni}" data-op-id="${node.id}" title="Operando${meta.sym ? `: ${meta.sym}` : ''}" aria-label="Operando">${empty ? '<option value="" selected>&lt;??.?&gt;</option>' : ''}${o}</select></span>`;
     };
-    const ctcHtml = c => `<div class="lx-el lx-ctc${selCls(c.id)}${errCls(c.id)}${pf(c.id)}" data-lx-ni="${ni}" data-lx-id="${c.id}" data-pf="${c.id}"${edit ? ' draggable="true"' : ''} title="${c.nc ? 'Contacto normalmente cerrado' : 'Contacto normalmente abierto'}">
+    const ctcHtml = c => `<div class="lx-el lx-ctc${selCls(c.id)}${errCls(c.id)}${pf(c.id)}" data-lx-ni="${ni}" data-lx-id="${c.id}" data-pf="${c.id}"${edit ? ' draggable="true"' : ''} title="${LX_CTC_KINDS[lxCtcKind(c)]}">
       <div class="lx-opbox">${opSel(c, tags)}</div>
-      <div class="lx-glyph"><span class="lx-wl"></span>${c.nc ? LX_SVG.NC : LX_SVG.NO}<span class="lx-wl"></span></div>
+      <div class="lx-glyph"><span class="lx-wl"></span>${LX_SVG[lxCtcKind(c)]}<span class="lx-wl"></span></div>
     </div>`;
     const gapHtml = (ser, i, grow) => `<div class="lx-gap${grow ? ' lx-gap-grow' : ''}${sel && sel.ni === ni && sel.gap && sel.gap.sid === ser.id && sel.gap.i === i ? ' lx-sel' : ''}${pf(`${ser.id}:${i}`)}" data-pf="${ser.id}:${i}"${edit ? ` data-gap-ni="${ni}" data-gap-sid="${ser.id}" data-gap-i="${i}"` : ''}></div>`;
     const serHtml = (ser, grow) => `<div class="lx-ser${grow ? ' lx-ser-grow' : ''}">${ser.items.map((it, i) => gapHtml(ser, i, false) + (it.t === 'C' ? ctcHtml(it) : parHtml(it))).join('')}${gapHtml(ser, ser.items.length, true)}</div>`;
     const parHtml = p => `<div class="lx-par${fl ? (fl[`${p.id}:in`] ? ' pf-in' : '') + (fl[`${p.id}:out`] ? ' pf-out' : '') : ''}" data-pf-par="${p.id}">${p.branches.map(b => `<div class="lx-br">${serHtml(b, true)}</div>`).join('')}</div>`;
     const coilHtml = o => {
-      const isTon = o.kind === 'TON';
-      const glyph = isTon
+      const isTon = o.kind === 'TON' || o.kind === 'CTU';
+      const pv = o.pv || 3;
+      const glyph = o.kind === 'CTU'
+        ? `<div class="lx-box"><span class="lx-box-t">CTU</span><span class="lx-box-r">Int</span><span class="lx-box-pt">PV ${edit ? `<input class="lx-pv" type="number" min="1" max="99" value="${pv}" data-pv-ni="${ni}" data-pv-id="${o.id}" aria-label="Valor de preselección PV">` : `<b>${pv}</b>`}</span><span class="lx-box-pt">CV <b class="lx-ctu-cv">${state.lxMem.cv}</b></span></div>`
+        : isTon
         ? `<div class="lx-box"><span class="lx-box-t">TON</span><span class="lx-box-r">Time</span><span class="lx-box-pt">PT <b>T#${SCENARIOS[state.scenario].timerPT || state.timerPT}s</b></span><span class="lx-box-pt">ET <b class="lx-ton-et">${state.timerET.toFixed(1)}s</b></span></div>`
         : `<div class="lx-glyph"><span class="lx-wl"></span>${LX_SVG.coil(o.kind === '=' ? '' : o.kind)}<span class="lx-wl lx-wl-end"></span></div>`;
       return `<div class="lx-el lx-coil${isTon ? ' lx-ton' : ''}${selCls(o.id)}${errCls(o.id)}${pf(o.id)}" data-lx-ni="${ni}" data-lx-id="${o.id}" data-pf="${o.id}"${edit ? ' draggable="true"' : ''} title="${LX_COIL_KINDS[o.kind]}">
@@ -851,6 +923,7 @@ function lxPaintFlow(root, nets) {
     if (coils) coils.classList.toggle('pf-in', !!f[`${net.id}:rlo`]);
   });
   root.querySelectorAll('.lx-ton-et').forEach(x => { x.textContent = state.timerET.toFixed(1) + 's'; });
+  root.querySelectorAll('.lx-ctu-cv').forEach(x => { x.textContent = state.lxMem.cv; });
 }
 function lxClearFlow(root) {
   root.querySelectorAll('.pf-on,.pf-off,.pf-in,.pf-out').forEach(x => x.classList.remove('pf-on', 'pf-off', 'pf-in', 'pf-out'));
@@ -873,11 +946,14 @@ function builderLadder() {
   const favBar = `<div class="lx-favbar" role="toolbar" aria-label="Favoritos LAD">
     ${fav('NO', LX_SVG.NO, 'NA', 'F2', 'Contacto normalmente abierto')}
     ${fav('NC', LX_SVG.NC, 'NC', 'F3', 'Contacto normalmente cerrado')}
+    ${fav('P', LX_SVG.P, 'Flanco P', '', LX_CTC_KINDS.P)}
+    ${fav('N', LX_SVG.N, 'Flanco N', '', LX_CTC_KINDS.N)}
     <span class="lx-fav-sep"></span>
     ${fav('=', LX_SVG.coil(''), 'Bobina', 'F7', 'Bobina de asignación')}
     ${fav('S', LX_SVG.coil('S'), 'Set', '', 'Activar salida (SET)')}
     ${fav('R', LX_SVG.coil('R'), 'Reset', '', 'Desactivar salida (RESET)')}
     ${isSeq ? fav('TON', `<svg class="lx-g" viewBox="0 0 30 28" width="30" height="28"><rect x="4" y="4" width="22" height="20" rx="2" fill="none"/><text x="15" y="17.5" text-anchor="middle" style="font-size:8px">TON</text></svg>`, 'TON', '', 'Temporizador con retardo a la conexión') : ''}
+    ${fav('CTU', `<svg class="lx-g" viewBox="0 0 30 28" width="30" height="28"><rect x="4" y="4" width="22" height="20" rx="2" fill="none"/><text x="15" y="17.5" text-anchor="middle" style="font-size:8px">CTU</text></svg>`, 'CTU', '', 'Contador ascendente CTU')}
     <span class="lx-fav-sep"></span>
     <button class="lx-fav" data-lx-act="BRANCH" title="Abrir rama paralela en el contacto seleccionado (Shift+F8). Shift+clic en otro contacto de la misma línea para abarcar varios.">${LX_SVG.BR}<span>Rama</span></button>
     <button class="lx-fav" data-lx-act="ADDBR" title="Añadir otra rama al paralelo que contiene la selección">${LX_SVG.ADDBR}<span>+ Rama</span></button>
@@ -989,10 +1065,10 @@ function lxSelNet() {
   const ni = state.ldSel ? Math.min(state.ldSel.ni, state.ladderNets.length - 1) : state.ladderNets.length - 1;
   return { ni, net: state.ladderNets[ni] };
 }
-function lxInsertContact(nc, target) {
+function lxInsertContact(kind, target) {
   const { ni, net } = target ? { ni:target.ni, net:state.ladderNets[target.ni] } : lxSelNet();
   const s = target || state.ldSel || {};
-  const c = lxCtc(null, nc);
+  const c = lxCtc(null, kind === 'NC', kind === 'P' || kind === 'N' ? kind : undefined);
   const gapRef = s.gap ? lxFind(net, s.gap.sid) : null;
   if (s.gap && (gapRef || net.logic.id === s.gap.sid)) {
     const ser = gapRef ? gapRef.node : net.logic;
@@ -1011,6 +1087,7 @@ function lxInsertCoil(kind, ni) {
   const net = state.ladderNets[ni];
   const tags = lxCoilTags(kind);
   const o = lxCoil(kind, tags.length === 1 ? tags[0] : null);
+  if (kind === 'CTU') o.pv = 3;
   const f = state.ldSel && state.ldSel.ni === ni && state.ldSel.id ? lxFind(net, state.ldSel.id) : null;
   if (f && f.node.t === 'O') net.coils.splice(f.index + 1, 0, o); else net.coils.push(o);
   state.ldSel = { ni, id:o.id };
@@ -1086,37 +1163,20 @@ function lxMove(fromNi, id, target) {
 // secuencia de entradas más corta que lo provoca.
 const LX_SCAN_S = 0.7; // duración de un ciclo del simulador (igual que el intervalo de la app)
 
-function lxSimTick(nets, st, inp, ptSteps) {
-  const s = { ...st, q: { ...st.q } };
+function lxSimTick(nets, st, inp, ptSteps, pv) {
+  const m = { ...st, q:{ ...st.q }, e:{ ...st.e }, eo:{ ...st.eo }, pv, cvMax:pv };
   const io = { 'I0.0':inp[0], 'I0.1':inp[1], 'I0.2':inp[2], 'I0.3':inp[3] };
-  const ctc = c => {
-    if (!c.tag) return false;
-    const v = c.tag === 'M0.0' ? s.M : c.tag === 'T0.0' ? s.TQ : c.tag in s.q ? s.q[c.tag] : !!io[c.tag];
-    return c.nc ? !v : v;
-  };
-  const ev = n => n.t === 'C' ? ctc(n) : n.t === 'S' ? n.items.every(ev) : n.branches.some(ev);
-  const scan = () => {
-    for (const net of nets) {
-      if (!net.coils.length) continue;
-      const on = ev(net.logic);
-      for (const o of net.coils) {
-        if (!LX_BITS[o.tag]) continue;
-        const v = o.kind === '=' ? on : o.kind === 'S' ? (on ? true : null) : o.kind === 'R' ? (on ? false : null) : null;
-        if (v === null) continue;
-        if (o.tag === 'M0.0') s.M = v; else s.q[o.tag] = v;
-      }
-    }
-  };
+  const inVal = t => io[t];
   // Igual que el ciclo real: scan, actualizar TON, scan.
-  scan();
+  lxScan(nets, m, inVal);
   const ton = nets.find(n => n.coils.some(o => coilKey(o) === 'T0.0/TON'));
   if (ton) {
-    if (ev(ton.logic)) { s.k = Math.min(s.k + 1, ptSteps); s.TQ = s.k >= ptSteps; }
-    else { s.k = 0; s.TQ = false; }
-    scan();
+    if (lxEvalWith(ton.logic, m, inVal)) { m.k = Math.min(m.k + 1, ptSteps); m.TQ = m.k >= ptSteps; }
+    else { m.k = 0; m.TQ = false; }
+    lxScan(nets, m, inVal);
   }
-  s.Q = s.q['Q0.0'];
-  return s;
+  m.Q = m.q['Q0.0'];
+  return m;
 }
 
 function lxVerify() {
@@ -1131,9 +1191,12 @@ function lxVerify() {
     if (!(b[2] && b[3])) combos.push(b);
   }
   combos.sort((x, y) => x.filter(Boolean).length - y.filter(Boolean).length);
-  const bits = x => `${+x.M}${+x.TQ}${x.k}${+x.q['Q0.0']}${+x.q['Q0.1']}${+x.q['Q0.2']}`;
+  // El contador se satura en PV: más pulsos no cambian C0 hasta el reset (espacio de estados finito).
+  const pvT = lxCtrPV(target), pvM = lxCtrPV(mine);
+  const mem = o => Object.keys(o).sort().map(k => `${k}${+o[k]}`).join('');
+  const bits = x => `${+x.M}${+x.TQ}${x.k}${+x.q['Q0.0']}${+x.q['Q0.1']}${+x.q['Q0.2']}c${x.cv}${+x.pcu}e${mem(x.e)}o${mem(x.eo)}`;
   const key = (a, b) => `${bits(a)}|${bits(b)}`;
-  const init = { M:false, Q:false, k:0, TQ:false, q:{ 'Q0.0':false, 'Q0.1':false, 'Q0.2':false } };
+  const init = { M:false, Q:false, k:0, TQ:false, q:{ 'Q0.0':false, 'Q0.1':false, 'Q0.2':false }, e:{}, eo:{}, cv:0, pcu:false };
   const bfs = list => {
     const nodes = [{ a:init, b:init, prev:-1, inp:null }];
     const seen = new Set([key(init, init)]);
@@ -1142,7 +1205,7 @@ function lxVerify() {
       const { a, b } = nodes[i];
       for (const inp of list) {
         trans++;
-        const na = lxSimTick(target, a, inp, ptSteps), nb = lxSimTick(mine, b, inp, ptSteps);
+        const na = lxSimTick(target, a, inp, ptSteps, pvT), nb = lxSimTick(mine, b, inp, ptSteps, pvM);
         if (na.Q !== nb.Q) {
           const path = [{ inp, exp:na.Q, got:nb.Q }];
           for (let j = i; nodes[j].prev >= 0; j = nodes[j].prev) path.unshift({ inp:nodes[j].inp, exp:nodes[j].a.Q, got:nodes[j].b.Q });
@@ -1220,6 +1283,13 @@ function lxCompile() {
   Object.entries(assigned).forEach(([t, nets]) => {
     if (nets.length > 1) warns.push(`%${t} se asigna en varias redes (${nets.join(', ')}): manda la última evaluada.`);
   });
+  const ctus = [], usesC0 = [];
+  state.ladderNets.forEach((net, ni) => {
+    net.coils.forEach(o => { if (o.kind === 'CTU') ctus.push({ o, ni }); else if (o.tag === 'C0') usesC0.push(ni + 1); });
+    lxWalk(net.logic, n => { if (n.t === 'C' && n.tag === 'C0') usesC0.push(ni + 1); });
+  });
+  if (ctus.length > 1) { msgs.push(`El contador %C0 tiene ${ctus.length} instrucciones CTU (redes ${ctus.map(c => c.ni + 1).join(', ')}): usa solo una.`); ctus.forEach(c => ids.push(c.o.id)); }
+  if (!ctus.length && usesC0.length) warns.push(`%C0 se usa en la red ${[...new Set(usesC0)].join(', ')} pero no hay ninguna instrucción CTU que cuente.`);
   Object.keys(assigned).filter(t => latched[t]).forEach(t =>
     warns.push(`%${t} se escribe con ( ) y también con S/R: la bobina ( ) sobrescribe el Set/Reset en cada ciclo.`));
   if (!used) msgs.push('El bloque OB1 no contiene instrucciones.');
@@ -1254,7 +1324,7 @@ function evaluateContact(tag) {
   const nc = tag.endsWith('/NC');
   const base = nc ? tag.slice(0, -3) : tag;
   const vals = { 'I0.0': state.inputs.start, 'I0.1': state.inputs.stop, 'I0.2': state.levelLow, 'I0.3': state.levelHigh, 'M0.0': state.latch, 'T0.0': state.timerQ,
-                 'Q0.0': state.pumpCommand, 'Q0.1': state.q01, 'Q0.2': state.q02 };
+                 'Q0.0': state.pumpCommand, 'Q0.1': state.q01, 'Q0.2': state.q02, 'C0': state.lxMem.cv >= lxCtrPV(state.cpuNets) };
   const raw = (base in state.forced) ? state.forced[base] : (vals[base] ?? false);
   return nc ? !raw : raw;
 }
@@ -1274,6 +1344,7 @@ function symTableHtml() {
     { tag:'I0.3', desc:sc.io.i03,  val:()=>state.levelHigh,    type:'I', clickable:false },
     { tag:'M0.0', desc:'Memoria',  val:()=>state.latch,        type:'M', clickable:false },
     ...(isSeq ? [{ tag:'T0.0', desc:`TON ${sc.timerPT||state.timerPT}s`, val:()=>state.timerQ, type:'T', clickable:false, et:()=>state.timerET }] : []),
+    { tag:'C0',   desc:`Contador CTU (PV ${lxCtrPV(state.ladderNets)})`, val:()=>state.lxMem.cv >= lxCtrPV(state.cpuNets), type:'C', clickable:false, cv:true },
     { tag:'Q0.0', desc:sc.io.q00,  val:()=>state.output,       type:'Q', clickable:false },
     { tag:'Q0.1', desc:'Piloto ámbar', val:()=>state.q01,      type:'Q', clickable:false },
     { tag:'Q0.2', desc:'Piloto de alarma', val:()=>state.q02,  type:'Q', clickable:false },
@@ -1282,7 +1353,7 @@ function symTableHtml() {
   return `<table class="sym-table"><thead><tr><th>Tag</th><th>Nombre simbólico</th><th>Descripción</th><th>Tipo</th><th>Valor</th></tr></thead><tbody>
 ${rows.map(r => {
   const v = r.val();
-  const etStr = r.et ? ` <small class="sym-et">${r.et().toFixed(1)}s</small>` : '';
+  const etStr = r.et ? ` <small class="sym-et">${r.et().toFixed(1)}s</small>` : r.cv ? ` <small class="sym-cv">CV ${state.lxMem.cv}</small>` : '';
   const inp = r.clickable ? ` data-input="${r.tag==='I0.0'?'start':'stop'}"` : '';
   const uc = tagUsageCount(r.tag);
   const ucBadge = uc > 0 ? `<span class="xref-use-badge" title="${uc} uso(s) en el programa">×${uc}</span>` : '';
@@ -1334,8 +1405,8 @@ function lxUsages(tag) {
   const usages = [];
   state.ladderNets.forEach((net, ni) => {
     const netLbl = `Network ${ni+1}${net.title ? ' — ' + net.title : ''}`;
-    lxWalk(net.logic, n => { if (n.t === 'C' && n.tag === tag) usages.push({ net: netLbl, pos: 'Contacto', mod: n.nc ? 'NC' : 'NO' }); });
-    net.coils.forEach(o => { if (o.tag === tag) usages.push({ net: netLbl, pos: o.kind === 'TON' ? 'Temporizador' : 'Bobina', mod: o.kind === '=' ? '(bobina)' : o.kind }); });
+    lxWalk(net.logic, n => { if (n.t === 'C' && n.tag === tag) usages.push({ net: netLbl, pos: 'Contacto', mod: lxCtcKind(n) }); });
+    net.coils.forEach(o => { if (o.tag === tag) usages.push({ net: netLbl, pos: o.kind === 'TON' ? 'Temporizador' : o.kind === 'CTU' ? 'Contador' : 'Bobina', mod: o.kind === '=' ? '(bobina)' : o.kind }); });
   });
   return usages;
 }
@@ -2190,6 +2261,8 @@ function patchDom() {
   symPatch('I0.3', state.levelHigh);
   symPatch('M0.0', state.latch);
   symPatch('T0.0', state.timerQ, state.timerET);
+  symPatch('C0', state.lxMem.cv >= lxCtrPV(state.cpuNets));
+  document.querySelectorAll('.sym-cv').forEach(x => { x.textContent = `CV ${state.lxMem.cv}`; });
   symPatch('Q0.0', state.output);
   symPatch('Q0.1', state.q01);
   symPatch('Q0.2', state.q02);
@@ -2227,6 +2300,14 @@ function setupEvents() {
       const net = state.ladderNets[+opEl.dataset.opNi];
       const f = net && lxFind(net, opEl.dataset.opId);
       if (f) { f.node.tag = opEl.value; state.ldSel = { ni:+opEl.dataset.opNi, id:f.node.id }; lxTouch(); }
+      render(); return;
+    }
+    const pvEl = e.target.closest('.lx-pv');
+    if (pvEl) {
+      const net = state.ladderNets[+pvEl.dataset.pvNi];
+      const f = net && lxFind(net, pvEl.dataset.pvId);
+      const v = Math.round(+pvEl.value);
+      if (f && v >= 1 && v <= 99) { f.node.pv = v; lxTouch(); }
       render(); return;
     }
     const nInp = e.target.closest('.ld-net-inp');
@@ -2315,7 +2396,7 @@ function setupEvents() {
     if (!fav && !el) return;
     if (fav) {
       const act = fav.dataset.lxDrag;
-      _lxDrag = { act, coil: !(act === 'NO' || act === 'NC') };
+      _lxDrag = { act, coil: !['NO','NC','P','N'].includes(act) };
       e.dataTransfer.effectAllowed = 'copy';
     } else {
       _lxDrag = { ni:+el.dataset.lxNi, id:el.dataset.lxId, coil: el.classList.contains('lx-coil') };
@@ -2345,7 +2426,7 @@ function setupEvents() {
     const target = z.dataset.gapSid ? { ni, gap:{ sid:z.dataset.gapSid, i:+z.dataset.gapI } } : { ni, id:z.dataset.lxId };
     if (d.act) {
       if (d.coil) { state.ldSel = { ni }; lxInsertCoil(d.act, ni); }
-      else lxInsertContact(d.act === 'NC', target);
+      else lxInsertContact(d.act, target);
     } else if (d.coil) {
       if (d.ni !== ni) lxMove(d.ni, d.id, { ni });
     } else {
@@ -2379,8 +2460,8 @@ function setupEvents() {
     const mod = e.ctrlKey || e.metaKey;
     if (mod && !onOp && (k === 'z' || k === 'Z') && !e.shiftKey) { if (!lxUndo()) msg = 'No hay nada que deshacer.'; }
     else if (mod && !onOp && (k === 'y' || k === 'Y' || ((k === 'z' || k === 'Z') && e.shiftKey))) { if (!lxRedo()) msg = 'No hay nada que rehacer.'; }
-    else if (k === 'F2') lxInsertContact(false);
-    else if (k === 'F3') lxInsertContact(true);
+    else if (k === 'F2') lxInsertContact('NO');
+    else if (k === 'F3') lxInsertContact('NC');
     else if (k === 'F7') lxInsertCoil('=');
     else if (k === 'F8' && e.shiftKey) msg = lxOpenBranch();
     else if ((k === 'Delete' || k === 'Backspace') && state.ldSel?.id) lxDeleteSel();
@@ -2451,7 +2532,7 @@ function setupEvents() {
     if (favEl) {
       const act = favEl.dataset.lxAct;
       let msg = null;
-      if (act === 'NO' || act === 'NC') lxInsertContact(act === 'NC');
+      if (['NO','NC','P','N'].includes(act)) lxInsertContact(act);
       else if (act === 'BRANCH') msg = lxOpenBranch();
       else if (act === 'ADDBR') msg = lxAddBranch();
       else if (act === 'DEL') { if (state.ldSel?.id) lxDeleteSel(); else msg = 'Selecciona el elemento que quieres borrar.'; }
@@ -2596,7 +2677,7 @@ function setupEvents() {
           updateLogic();
         }
         state.scanCount++;
-        state.feedback = `Scan #${state.scanCount} — M0.0=${state.latch?1:0} · Q0.0=${state.pumpCommand?1:0} · Q0.1=${state.q01?1:0} · Q0.2=${state.q02?1:0} · T0.0Q=${state.timerQ?1:0}`;
+        state.feedback = `Scan #${state.scanCount} — M0.0=${state.latch?1:0} · Q0.0=${state.pumpCommand?1:0} · Q0.1=${state.q01?1:0} · Q0.2=${state.q02?1:0} · T0.0Q=${state.timerQ?1:0} · C0 CV=${state.lxMem.cv}`;
         state.feedbackType = 'ok';
         render(); return;
       }
@@ -2725,7 +2806,7 @@ function setupEvents() {
         const res = lxCompile();
         state.ladderErrors = res;
         if (res.ok) {
-          state.cpuNets = lxClone(state.ladderNets); state.ldDirty = false;
+          state.cpuNets = lxClone(state.ladderNets); state.ldDirty = false; lxResetMem();
           state.compiled = true; state.plcRunning = false;
           state.feedback = `Compilación finalizada sin errores${res.warns.length ? ` (${res.warns.length} advertencia(s))` : ''} — programa cargado en la CPU. Pulsa ▶ Arrancar.`; state.feedbackType = 'ok';
         } else {
@@ -2734,7 +2815,7 @@ function setupEvents() {
         }
         render(); break;
       }
-      case 'resetPlc': { const _rsc = SCENARIOS[state.scenario]; const _rn = _rsc.rungs || 3; state.compiled = false; state.plcRunning = false; state.plcMonitor = false; state.latch = false; state.systemEnabled = false; state.ladderNets = lxNets(_rn); state.cpuNets = null; state.ldDirty = false; state.ldSel = null; state.forced = {}; state.xrefTag = null; state.plcScanMode = false; state.scanCount = 0; state.ladderErrors = null; state.activeSlot = null; state.inputs = { start: false, stop: false }; state.hintIdx = -1; state.hintMsg = ''; state.timerET = 0; state.timerQ = false; delete state.ladderSave[state.scenario]; state.verifyResult = null; lxCommit(); lxForget(state.scenario); state.feedback = 'PLC reiniciado — programa borrado (Ctrl+Z para recuperarlo).'; state.feedbackType = 'ok'; render(); break; }
+      case 'resetPlc': { const _rsc = SCENARIOS[state.scenario]; const _rn = _rsc.rungs || 3; state.compiled = false; state.plcRunning = false; state.plcMonitor = false; state.latch = false; state.systemEnabled = false; state.ladderNets = lxNets(_rn); state.cpuNets = null; state.ldDirty = false; state.ldSel = null; state.forced = {}; state.xrefTag = null; state.plcScanMode = false; state.scanCount = 0; state.ladderErrors = null; state.activeSlot = null; state.inputs = { start: false, stop: false }; state.hintIdx = -1; state.hintMsg = ''; state.timerET = 0; state.timerQ = false; lxResetMem(); delete state.ladderSave[state.scenario]; state.verifyResult = null; lxCommit(); lxForget(state.scenario); state.feedback = 'PLC reiniciado — programa borrado (Ctrl+Z para recuperarlo).'; state.feedbackType = 'ok'; render(); break; }
       case 'newFault': {
         const sf = currentFaults();
         const keys = Object.keys(sf);
