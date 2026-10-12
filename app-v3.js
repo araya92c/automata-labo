@@ -12,6 +12,8 @@ const state = {
   levelHigh: false,
   fillDemand: false,
   pumpCommand: false,
+  q01: false,
+  q02: false,
   output: false,
   drainOpen: false,
   manualPump: false,
@@ -435,7 +437,7 @@ function updateLogic() {
   }
   const ready = effectivePower() && state.wires.supply && effectiveSensorWire() && !safetyOpen() && state.systemEnabled;
   if (!ready) {
-    state.pumpCommand = false;
+    state.pumpCommand = false; state.q01 = false; state.q02 = false;
     state.output = false;
     if (!state.systemEnabled || safetyOpen()) state.latch = false;
   } else if (state.mode === "config") {
@@ -444,21 +446,20 @@ function updateLogic() {
     state.output = state.pumpCommand && effectiveOutputWire();
   } else {
     if (!state.compiled || (!state.plcRunning && !state.plcScanMode)) {
-      if (!state.plcScanMode) { state.latch = false; state.pumpCommand = false; }
+      if (!state.plcScanMode) { state.latch = false; state.pumpCommand = false; state.q01 = false; state.q02 = false; }
     } else {
-      state.pumpCommand = false;
+      // Imagen de proceso: M0.0 y Q0.x conservan su valor entre ciclos;
+      // ( ) escribe el RLO en cada ciclo, S/R solo cuando el RLO es 1.
       for (const net of state.cpuNets || []) {
         const on = evaluateNet(net);
         for (const o of net.coils) {
-          const coil = coilKey(o);
-          if      (coil === 'M0.0/S') { if (on) state.latch = true; }
-          else if (coil === 'M0.0/R') { if (on) state.latch = false; }
-          else if (coil === 'M0.0')   { state.latch = on; }
-          else if (coil === 'Q0.0')   { state.pumpCommand = on; }
+          if (!LX_BITS[o.tag]) continue;
+          if (o.kind === '=') lxWriteBit(o.tag, on);
+          else if (o.kind === 'S') { if (on) lxWriteBit(o.tag, true); }
+          else if (o.kind === 'R') { if (on) lxWriteBit(o.tag, false); }
         }
       }
-      if ('M0.0' in state.forced) state.latch = state.forced['M0.0'];
-      if ('Q0.0' in state.forced) state.pumpCommand = state.forced['Q0.0'];
+      for (const t of Object.keys(LX_BITS)) if (t in state.forced) lxWriteBit(t, state.forced[t]);
     }
     state.output = state.pumpCommand && effectiveOutputWire();
   }
@@ -655,6 +656,9 @@ const lxNet  = () => ({ id:lxId('n'), title:'', comment:'', logic:lxSer(), coils
 const lxNets = n => Array.from({ length:n }, lxNet);
 const lxClone = v => JSON.parse(JSON.stringify(v));
 
+// Bits escribibles por bobinas → campo de state.
+const LX_BITS = { 'M0.0':'latch', 'Q0.0':'pumpCommand', 'Q0.1':'q01', 'Q0.2':'q02' };
+function lxWriteBit(tag, v) { state[LX_BITS[tag]] = v; }
 const ctcKey  = c => c?.tag ? c.tag + (c.nc ? '/NC' : '') : null;
 const coilKey = o => !o?.tag ? null : o.kind === '=' ? o.tag : `${o.tag}/${o.kind}`;
 const LX_COIL_KINDS = { '=': 'Asignación', S: 'Activar (SET)', R: 'Desactivar (RESET)', TON: 'Temporizador TON' };
@@ -754,13 +758,14 @@ function lxFlow(net) {
 
 function lxTagMeta(tag) {
   const sc = SCENARIOS[state.scenario];
-  const io = { 'I0.0':sc.io.i00, 'I0.1':sc.io.i01, 'I0.2':sc.io.i02, 'I0.3':sc.io.i03, 'M0.0':'MEMORIA', 'T0.0':'TEMPORIZADOR', 'Q0.0':sc.io.q00 };
+  const io = { 'I0.0':sc.io.i00, 'I0.1':sc.io.i01, 'I0.2':sc.io.i02, 'I0.3':sc.io.i03, 'M0.0':'MEMORIA', 'T0.0':'TEMPORIZADOR', 'Q0.0':sc.io.q00, 'Q0.1':'ÁMBAR', 'Q0.2':'ALARMA' };
   return { sym: state.tagNames[tag] || io[tag] || '', addr: tag };
 }
 function lxContactTags() {
-  return SCENARIOS[state.scenario].controlMode === 'sequence' ? ['I0.0','I0.1','M0.0','T0.0'] : ['I0.0','I0.1','I0.2','I0.3','M0.0'];
+  const q = ['Q0.0','Q0.1','Q0.2'];
+  return SCENARIOS[state.scenario].controlMode === 'sequence' ? ['I0.0','I0.1','M0.0','T0.0', ...q] : ['I0.0','I0.1','I0.2','I0.3','M0.0', ...q];
 }
-function lxCoilTags(kind) { return kind === 'TON' ? ['T0.0'] : kind === '=' ? ['Q0.0','M0.0'] : ['M0.0']; }
+function lxCoilTags(kind) { return kind === 'TON' ? ['T0.0'] : ['Q0.0','Q0.1','Q0.2','M0.0']; }
 function lxCoilKinds() { return SCENARIOS[state.scenario].controlMode === 'sequence' ? ['=','S','R','TON'] : ['=','S','R']; }
 
 const LX_SVG = {
@@ -1082,25 +1087,23 @@ function lxMove(fromNi, id, target) {
 const LX_SCAN_S = 0.7; // duración de un ciclo del simulador (igual que el intervalo de la app)
 
 function lxSimTick(nets, st, inp, ptSteps) {
-  const s = { ...st };
+  const s = { ...st, q: { ...st.q } };
   const io = { 'I0.0':inp[0], 'I0.1':inp[1], 'I0.2':inp[2], 'I0.3':inp[3] };
   const ctc = c => {
     if (!c.tag) return false;
-    const v = c.tag === 'M0.0' ? s.M : c.tag === 'T0.0' ? s.TQ : !!io[c.tag];
+    const v = c.tag === 'M0.0' ? s.M : c.tag === 'T0.0' ? s.TQ : c.tag in s.q ? s.q[c.tag] : !!io[c.tag];
     return c.nc ? !v : v;
   };
   const ev = n => n.t === 'C' ? ctc(n) : n.t === 'S' ? n.items.every(ev) : n.branches.some(ev);
   const scan = () => {
-    s.Q = false;
     for (const net of nets) {
       if (!net.coils.length) continue;
       const on = ev(net.logic);
       for (const o of net.coils) {
-        const k = coilKey(o);
-        if      (k === 'M0.0/S') { if (on) s.M = true; }
-        else if (k === 'M0.0/R') { if (on) s.M = false; }
-        else if (k === 'M0.0')   s.M = on;
-        else if (k === 'Q0.0')   s.Q = on;
+        if (!LX_BITS[o.tag]) continue;
+        const v = o.kind === '=' ? on : o.kind === 'S' ? (on ? true : null) : o.kind === 'R' ? (on ? false : null) : null;
+        if (v === null) continue;
+        if (o.tag === 'M0.0') s.M = v; else s.q[o.tag] = v;
       }
     }
   };
@@ -1112,6 +1115,7 @@ function lxSimTick(nets, st, inp, ptSteps) {
     else { s.k = 0; s.TQ = false; }
     scan();
   }
+  s.Q = s.q['Q0.0'];
   return s;
 }
 
@@ -1127,8 +1131,9 @@ function lxVerify() {
     if (!(b[2] && b[3])) combos.push(b);
   }
   combos.sort((x, y) => x.filter(Boolean).length - y.filter(Boolean).length);
-  const key = (a, b) => `${+a.M}${+a.TQ}${a.k}|${+b.M}${+b.TQ}${b.k}`;
-  const init = { M:false, Q:false, k:0, TQ:false };
+  const bits = x => `${+x.M}${+x.TQ}${x.k}${+x.q['Q0.0']}${+x.q['Q0.1']}${+x.q['Q0.2']}`;
+  const key = (a, b) => `${bits(a)}|${bits(b)}`;
+  const init = { M:false, Q:false, k:0, TQ:false, q:{ 'Q0.0':false, 'Q0.1':false, 'Q0.2':false } };
   const bfs = list => {
     const nodes = [{ a:init, b:init, prev:-1, inp:null }];
     const seen = new Set([key(init, init)]);
@@ -1194,7 +1199,7 @@ function lxTonNet() { return (state.cpuNets || []).find(n => n.coils.some(o => c
 function lxCompile() {
   const msgs = [], warns = [], ids = [];
   const sc = SCENARIOS[state.scenario];
-  const assigned = {};
+  const assigned = {}, latched = {};
   let used = 0;
   state.ladderNets.forEach((net, ni) => {
     const nm = `Network ${ni + 1}`;
@@ -1209,11 +1214,14 @@ function lxCompile() {
     net.coils.forEach(o => {
       if (o.kind === 'TON' && sc.controlMode !== 'sequence') { msgs.push(`${nm}: TON no disponible en este proceso.`); ids.push(o.id); }
       if (o.kind === '=' && o.tag) (assigned[o.tag] = assigned[o.tag] || []).push(ni + 1);
+      if ((o.kind === 'S' || o.kind === 'R') && o.tag) (latched[o.tag] = latched[o.tag] || []).push(ni + 1);
     });
   });
   Object.entries(assigned).forEach(([t, nets]) => {
     if (nets.length > 1) warns.push(`%${t} se asigna en varias redes (${nets.join(', ')}): manda la última evaluada.`);
   });
+  Object.keys(assigned).filter(t => latched[t]).forEach(t =>
+    warns.push(`%${t} se escribe con ( ) y también con S/R: la bobina ( ) sobrescribe el Set/Reset en cada ciclo.`));
   if (!used) msgs.push('El bloque OB1 no contiene instrucciones.');
   return { ok: !msgs.length, msgs, warns, ids };
 }
@@ -1245,7 +1253,8 @@ function evaluateContact(tag) {
   if (!tag) return false;
   const nc = tag.endsWith('/NC');
   const base = nc ? tag.slice(0, -3) : tag;
-  const vals = { 'I0.0': state.inputs.start, 'I0.1': state.inputs.stop, 'I0.2': state.levelLow, 'I0.3': state.levelHigh, 'M0.0': state.latch, 'T0.0': state.timerQ };
+  const vals = { 'I0.0': state.inputs.start, 'I0.1': state.inputs.stop, 'I0.2': state.levelLow, 'I0.3': state.levelHigh, 'M0.0': state.latch, 'T0.0': state.timerQ,
+                 'Q0.0': state.pumpCommand, 'Q0.1': state.q01, 'Q0.2': state.q02 };
   const raw = (base in state.forced) ? state.forced[base] : (vals[base] ?? false);
   return nc ? !raw : raw;
 }
@@ -1266,6 +1275,8 @@ function symTableHtml() {
     { tag:'M0.0', desc:'Memoria',  val:()=>state.latch,        type:'M', clickable:false },
     ...(isSeq ? [{ tag:'T0.0', desc:`TON ${sc.timerPT||state.timerPT}s`, val:()=>state.timerQ, type:'T', clickable:false, et:()=>state.timerET }] : []),
     { tag:'Q0.0', desc:sc.io.q00,  val:()=>state.output,       type:'Q', clickable:false },
+    { tag:'Q0.1', desc:'Piloto ámbar', val:()=>state.q01,      type:'Q', clickable:false },
+    { tag:'Q0.2', desc:'Piloto de alarma', val:()=>state.q02,  type:'Q', clickable:false },
   ];
   const tn = state.tagNames;
   return `<table class="sym-table"><thead><tr><th>Tag</th><th>Nombre simbólico</th><th>Descripción</th><th>Tipo</th><th>Valor</th></tr></thead><tbody>
@@ -1298,6 +1309,8 @@ function forceTableHtml() {
     { tag: 'I0.3', desc: sc.io.i03, type: 'BOOL' },
     { tag: 'M0.0', desc: 'Memoria/enclavamiento', type: 'BOOL' },
     { tag: 'Q0.0', desc: sc.io.q00, type: 'BOOL' },
+    { tag: 'Q0.1', desc: 'Piloto ámbar', type: 'BOOL' },
+    { tag: 'Q0.2', desc: 'Piloto de alarma', type: 'BOOL' },
   ];
   return `<table class="sym-table force-table"><thead><tr><th>Tag</th><th>Nombre</th><th>Descripción</th><th>Valor</th><th colspan="3">Forzar</th></tr></thead><tbody>
 ${frows.map(r => {
@@ -1392,7 +1405,7 @@ function programView() {
   const stopColor = !running && state.compiled ? '#f59e0b' : '#374151';
   const errColor  = state.alarm && running ? '#ef4444' : '#374151';
   const diVals    = [state.inputs.start, state.inputs.stop, state.levelLow, state.levelHigh];
-  const dqVals    = [state.output, false, state.alarm && running];
+  const dqVals    = [state.output, state.q01, state.q02];
   const diLeds    = diVals.map((on,i) =>
     `<circle id="plc-di-${i}" cx="${18+i*22}" cy="122" r="5.5" fill="${on&&running?'#22c55e':'#374151'}"/>` +
     `<text x="${18+i*22}" y="136" text-anchor="middle" font-size="6.5" fill="#6b7280">I0.${i}</text>`
@@ -1441,11 +1454,11 @@ function programView() {
       <div class="plc-bulb plc-bulb-green"></div>
       <span class="plc-lbl">Q0.0<br>${sc.io.q00}</span>
     </div>
-    <div id="plc-pilot-q01" class="plc-pilot">
+    <div id="plc-pilot-q01" class="plc-pilot${state.q01?' plc-on':''}">
       <div class="plc-bulb plc-bulb-amber"></div>
       <span class="plc-lbl">Q0.1<br>ÁMBAR</span>
     </div>
-    <div id="plc-pilot-q02" class="plc-pilot${state.alarm&&running?' plc-on':''}">
+    <div id="plc-pilot-q02" class="plc-pilot${state.q02?' plc-on':''}">
       <div class="plc-bulb plc-bulb-red"></div>
       <span class="plc-lbl">Q0.2<br>ALARMA</span>
     </div>
@@ -2178,6 +2191,8 @@ function patchDom() {
   symPatch('M0.0', state.latch);
   symPatch('T0.0', state.timerQ, state.timerET);
   symPatch('Q0.0', state.output);
+  symPatch('Q0.1', state.q01);
+  symPatch('Q0.2', state.q02);
 
   // S7-1200 SVG LEDs + pilot lights
   const plcRun2 = state.plcRunning && state.compiled;
@@ -2186,11 +2201,11 @@ function patchDom() {
   set('plc-led-err',  el => el.setAttribute('fill', state.alarm && plcRun2 ? '#ef4444' : '#374151'));
   [state.inputs.start, state.inputs.stop, state.levelLow, state.levelHigh].forEach((v,i) =>
     set(`plc-di-${i}`, el => el.setAttribute('fill', v && plcRun2 ? '#22c55e' : '#374151')));
-  [state.output, false, state.alarm && plcRun2].forEach((v,i) =>
+  [state.output, state.q01, state.q02].forEach((v,i) =>
     set(`plc-dq-${i}`, el => el.setAttribute('fill', v ? '#22c55e' : '#374151')));
   set('plc-pilot-q00', el => el.classList.toggle('plc-on', state.output));
-  set('plc-pilot-q01', el => el.classList.toggle('plc-on', false));
-  set('plc-pilot-q02', el => el.classList.toggle('plc-on', state.alarm && plcRun2));
+  set('plc-pilot-q01', el => el.classList.toggle('plc-on', state.q01));
+  set('plc-pilot-q02', el => el.classList.toggle('plc-on', state.q02));
 
   // Monitor mode: power flow in the LAD editor (only when editor == CPU program)
   const ldCanvas = document.querySelector('.lx-canvas');
@@ -2581,7 +2596,7 @@ function setupEvents() {
           updateLogic();
         }
         state.scanCount++;
-        state.feedback = `Scan #${state.scanCount} — M0.0=${state.latch?1:0} · Q0.0=${state.pumpCommand?1:0} · T0.0Q=${state.timerQ?1:0}`;
+        state.feedback = `Scan #${state.scanCount} — M0.0=${state.latch?1:0} · Q0.0=${state.pumpCommand?1:0} · Q0.1=${state.q01?1:0} · Q0.2=${state.q02?1:0} · T0.0Q=${state.timerQ?1:0}`;
         state.feedbackType = 'ok';
         render(); return;
       }
