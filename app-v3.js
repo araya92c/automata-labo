@@ -580,7 +580,7 @@ function processDiagram() {
       </div>
 
       <button id="d-alarm-unit" class="loop-component alarm-unit ${state.alarm && !state.alarmAck ? "ringing" : ""}" data-action="alarm" aria-label="Reconocer alarma">
-        <img src="./assets/immersive/alarm.webp" alt="Baliza roja de alarma"><span class="component-tag">Q0.1 ALARMA</span>
+        <img src="./assets/immersive/alarm.webp" alt="Baliza roja de alarma"><span class="component-tag">Q0.2 ALARMA</span>
       </button>
 
       <button id="d-pump-unit" class="loop-component pump-unit ${state.output ? "running" : ""}" data-action="pump" aria-label="Prueba manual de la bomba">
