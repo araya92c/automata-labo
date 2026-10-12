@@ -31,6 +31,7 @@ const state = {
   cpuNets: null,
   ldDirty: false,
   ldSel: null,
+  verifyResult: null,
   ladderSave: {},
   hintIdx: -1,
   hintMsg: '',
@@ -491,7 +492,6 @@ function missionCheck() {
   if (!_prevMissions) _prevMissions = { ...state.missions };
   state.missions.wiring = state.wires.supply && state.wires.sensor && state.wires.output;
   if (SCENARIOS[state.scenario].missionRelay(state)) state.missions.relay = true;
-  if (state.compiled && state.mode === "program" && state.output) state.missions.program = true;
   if (state.diagSolved) state.missions.diagnose = true;
   for (const key of ['wiring', 'relay', 'program', 'diagnose', 'builder']) {
     if (state.missions[key] && !_prevMissions[key]) showCelebration(key);
@@ -903,12 +903,13 @@ ${lxNetsHtml(state.ladderNets, { edit:true, flowOf: lxMonitoring() ? (net => lxF
 </div>
 <div class="ld-add-row"><button class="btn ld-add-btn" data-action="addRung">＋ Agregar red</button></div>
 ${info}
+${lxVerifyHtml()}
 ${hintSection}
 </div>`;
 }
 
 // ── Operaciones de edición ─────────────────────────────────────
-function lxTouch() { state.ldDirty = true; state.ladderErrors = null; lxCommit(); }
+function lxTouch() { state.ldDirty = true; state.ladderErrors = null; state.verifyResult = null; lxCommit(); }
 
 // ── Historial (deshacer/rehacer) y guardado local ─────────────
 // _lxHist.last es el estado ya confirmado; cada commit lo apila en undo.
@@ -916,7 +917,7 @@ const LX_STORE = 'automata-lab-ladder-v1';
 const LX_HIST_MAX = 50;
 const _lxHist = { undo: [], redo: [], last: null };
 function lxSnapshot() { return JSON.stringify(state.ladderNets); }
-function lxResetHistory() { _lxHist.undo = []; _lxHist.redo = []; _lxHist.last = lxSnapshot(); }
+function lxResetHistory() { _lxHist.undo = []; _lxHist.redo = []; _lxHist.last = lxSnapshot(); state.verifyResult = null; }
 function lxCommit() {
   const cur = lxSnapshot();
   if (_lxHist.last !== null && cur !== _lxHist.last) {
@@ -930,7 +931,7 @@ function lxCommit() {
 function lxRestore(snap) {
   state.ladderNets = JSON.parse(snap);
   _lxHist.last = snap;
-  state.ldSel = null; state.ldDirty = true; state.ladderErrors = null;
+  state.ldSel = null; state.ldDirty = true; state.ladderErrors = null; state.verifyResult = null;
   lxPersist();
 }
 function lxUndo() {
@@ -1072,6 +1073,120 @@ function lxMove(fromNi, id, target) {
   }
   state.ldSel = { ni:target.ni, id:node.id };
   lxTouch();
+}
+
+// ── Verificación por comportamiento ────────────────────────────
+// Simula el programa del alumno y la solución con las mismas entradas y recorre
+// (BFS) todos los estados alcanzables. Si en algún caso Q0.0 difiere, devuelve la
+// secuencia de entradas más corta que lo provoca.
+const LX_SCAN_S = 0.7; // duración de un ciclo del simulador (igual que el intervalo de la app)
+
+function lxSimTick(nets, st, inp, ptSteps) {
+  const s = { ...st };
+  const io = { 'I0.0':inp[0], 'I0.1':inp[1], 'I0.2':inp[2], 'I0.3':inp[3] };
+  const ctc = c => {
+    if (!c.tag) return false;
+    const v = c.tag === 'M0.0' ? s.M : c.tag === 'T0.0' ? s.TQ : !!io[c.tag];
+    return c.nc ? !v : v;
+  };
+  const ev = n => n.t === 'C' ? ctc(n) : n.t === 'S' ? n.items.every(ev) : n.branches.some(ev);
+  const scan = () => {
+    s.Q = false;
+    for (const net of nets) {
+      if (!net.coils.length) continue;
+      const on = ev(net.logic);
+      for (const o of net.coils) {
+        const k = coilKey(o);
+        if      (k === 'M0.0/S') { if (on) s.M = true; }
+        else if (k === 'M0.0/R') { if (on) s.M = false; }
+        else if (k === 'M0.0')   s.M = on;
+        else if (k === 'Q0.0')   s.Q = on;
+      }
+    }
+  };
+  // Igual que el ciclo real: scan, actualizar TON, scan.
+  scan();
+  const ton = nets.find(n => n.coils.some(o => coilKey(o) === 'T0.0/TON'));
+  if (ton) {
+    if (ev(ton.logic)) { s.k = Math.min(s.k + 1, ptSteps); s.TQ = s.k >= ptSteps; }
+    else { s.k = 0; s.TQ = false; }
+    scan();
+  }
+  return s;
+}
+
+function lxVerify() {
+  const sc = SCENARIOS[state.scenario];
+  const target = lxTargetNets(state.scenario);
+  const mine = lxClone(state.ladderNets);
+  const ptSteps = Math.max(1, Math.ceil((sc.timerPT || state.timerPT) / LX_SCAN_S - 1e-9));
+  // Combinaciones de entradas posibles: el sensor no puede estar bajo y alto a la vez.
+  const combos = [];
+  for (let m = 0; m < 16; m++) {
+    const b = [!!(m & 1), !!(m & 2), !!(m & 4), !!(m & 8)];
+    if (!(b[2] && b[3])) combos.push(b);
+  }
+  combos.sort((x, y) => x.filter(Boolean).length - y.filter(Boolean).length);
+  const key = (a, b) => `${+a.M}${+a.TQ}${a.k}|${+b.M}${+b.TQ}${b.k}`;
+  const init = { M:false, Q:false, k:0, TQ:false };
+  const bfs = list => {
+    const nodes = [{ a:init, b:init, prev:-1, inp:null }];
+    const seen = new Set([key(init, init)]);
+    let trans = 0;
+    for (let i = 0; i < nodes.length; i++) {
+      const { a, b } = nodes[i];
+      for (const inp of list) {
+        trans++;
+        const na = lxSimTick(target, a, inp, ptSteps), nb = lxSimTick(mine, b, inp, ptSteps);
+        if (na.Q !== nb.Q) {
+          const path = [{ inp, exp:na.Q, got:nb.Q }];
+          for (let j = i; nodes[j].prev >= 0; j = nodes[j].prev) path.unshift({ inp:nodes[j].inp, exp:nodes[j].a.Q, got:nodes[j].b.Q });
+          return { ok:false, steps:path };
+        }
+        const kk = key(na, nb);
+        if (!seen.has(kk)) { seen.add(kk); nodes.push({ a:na, b:nb, prev:i, inp }); }
+      }
+    }
+    return { ok:true, states:seen.size, trans };
+  };
+  // Primero sin pulsar MARCHA y PARADA a la vez (contraejemplos más claros);
+  // si todo coincide, se prueba también ese caso (prioridad de la parada).
+  const first = bfs(combos.filter(c => !(c[0] && c[1])));
+  if (!first.ok) return first;
+  const all = bfs(combos);
+  if (!all.ok) all.bothButtons = true;
+  return all;
+}
+
+function lxVerifyHtml() {
+  const v = state.verifyResult;
+  if (!v) return '';
+  const sc = SCENARIOS[state.scenario];
+  const out = lxTagMeta('Q0.0').sym || sc.io.q00;
+  if (v.ok) return `<div class="lx-verify lx-verify-ok">
+    <div class="lx-verify-hd">✔ Verificación superada</div>
+    <p>Tu programa responde igual que la solución en todas las situaciones posibles: se probaron ${v.trans} combinaciones de entradas sobre ${v.states} estados internos.</p>
+  </div>`;
+  const tags = ['I0.0','I0.1','I0.2','I0.3'];
+  const inpLbl = inp => { const on = tags.filter((t, i) => inp[i]).map(t => `<code>${lxTagMeta(t).sym || t}</code>`); return on.length ? on.join(' + ') : '<span class="lx-verify-none">ninguna</span>'; };
+  // Agrupa pasos consecutivos iguales (p. ej. esperar a que corra el TON).
+  const rows = [];
+  v.steps.forEach((s, i) => {
+    const last = rows[rows.length - 1];
+    const same = last && i < v.steps.length - 1 && last.inp.join() === s.inp.join() && last.exp === s.exp && last.got === s.got;
+    if (same) last.n++; else rows.push({ ...s, n:1, from:i + 1 });
+  });
+  const onOff = q => q ? '<b class="lx-q-on">1 · ON</b>' : '<b class="lx-q-off">0 · OFF</b>';
+  const fin = v.steps[v.steps.length - 1];
+  return `<div class="lx-verify lx-verify-bad">
+    <div class="lx-verify-hd">✖ Tu programa no se comporta como se espera</div>
+    ${v.bothButtons ? `<p>Solo falla si se pulsan <b>${lxTagMeta('I0.0').sym || 'I0.0'}</b> y <b>${lxTagMeta('I0.1').sym || 'I0.1'}</b> a la vez: la parada debe tener prioridad. Revisa el orden de las redes o usa un contacto NC de parada.</p>` : ''}
+    <p>Con esta secuencia de entradas, <b>${out}</b> debería quedar <b>${fin.exp ? 'encendida' : 'apagada'}</b>, pero tu programa la deja <b>${fin.got ? 'encendida' : 'apagada'}</b>.</p>
+    <table class="lx-verify-tbl"><thead><tr><th>Ciclo</th><th>Entradas activas</th><th>${out} esperada</th><th>Tu ${out}</th></tr></thead><tbody>
+    ${rows.map((r, i) => `<tr class="${i === rows.length - 1 ? 'lx-verify-fail' : ''}"><td>${r.n > 1 ? `${r.from}–${r.from + r.n - 1} <small>(×${r.n}, ≈${(r.n * LX_SCAN_S).toFixed(1)} s)</small>` : r.from}</td><td>${inpLbl(r.inp)}</td><td>${onOff(r.exp)}</td><td>${onOff(r.got)}</td></tr>`).join('')}
+    </tbody></table>
+    <p class="lx-verify-tip">Cada fila es un ciclo de scan (${LX_SCAN_S} s). Puedes reproducir el caso con <b>⏩ Paso</b> y la tabla de forzado.</p>
+  </div>`;
 }
 
 function lxTonNet() { return (state.cpuNets || []).find(n => n.coils.some(o => coilKey(o) === 'T0.0/TON')) || null; }
@@ -1238,6 +1353,7 @@ function programView() {
     </div>
     <div class="tia-vsep"></div>
     <button id="compile" class="tia-tb-btn">🔨 Compilar</button>
+    <button class="tia-tb-btn" data-action="plcVerify" title="Comprueba que tu programa se comporte como la solución en todas las situaciones">✔ Verificar</button>
     <button id="resetPlc" class="tia-tb-btn tia-tb-reset">↺ Reset</button>
     <div class="tia-vsep"></div>
     <button class="tia-tb-btn${state.plcMonitor?' tia-tb-mon-on':''}" data-action="plcMonitor"${!running?' disabled':''}>⬤ Monitor</button>
@@ -1736,7 +1852,7 @@ function sidebar() {
 }
 
 function missionRail() {
-  const items=[["wiring","CE 1.1.1 — Conectar componentes","Conecta fuente, sensor y actuador en el lazo de control."],["builder","CE 1.1.2 — Clasificar componentes","Identifica y monta cada elemento del lazo en la mesa de trabajo."],["relay","CE 1.1.4 — Configurar on/off","Ajusta P1 = 30% y P2 = 75% con histéresis adecuada."],["program","CE 2.1.3 — Implementar rutina","Compila el programa Ladder y activa la salida Q0.0."],["diagnose","CE 1.1.3 — Medir variables","Identifica la falla midiendo en los puntos del circuito."]];
+  const items=[["wiring","CE 1.1.1 — Conectar componentes","Conecta fuente, sensor y actuador en el lazo de control."],["builder","CE 1.1.2 — Clasificar componentes","Identifica y monta cada elemento del lazo en la mesa de trabajo."],["relay","CE 1.1.4 — Configurar on/off","Ajusta P1 = 30% y P2 = 75% con histéresis adecuada."],["program","CE 2.1.3 — Implementar rutina","Programa la rutina Ladder y pulsa ✔ Verificar: debe comportarse como la solución en todos los casos."],["diagnose","CE 1.1.3 — Medir variables","Identifica la falla midiendo en los puntos del circuito."]];
   const done=items.filter(i=>state.missions[i[0]]).length;
   if (!state.missionOpen) {
     return `<aside class="mission-rail mission-rail-collapsed"><button class="mission-tab" data-action="toggleMission" title="Mostrar ruta de aprendizaje"><span class="mission-tab-label">Ruta de aprendizaje</span><span class="mission-tab-badge">${done}/${items.length}</span></button></aside>`;
@@ -2469,6 +2585,21 @@ function setupEvents() {
         state.feedbackType = 'ok';
         render(); return;
       }
+      else if (a === 'plcVerify') {
+        const res = lxCompile();
+        if (!res.ok) {
+          state.ladderErrors = res; state.verifyResult = null;
+          state.feedback = 'Corrige los errores de compilación antes de verificar.'; state.feedbackType = 'warn';
+        } else {
+          state.ladderErrors = res.warns.length ? res : null;
+          state.verifyResult = lxVerify();
+          if (state.verifyResult.ok) { state.missions.program = true; state.feedback = 'Verificación superada ✓ — el programa cumple la rutina de control.'; state.feedbackType = 'ok'; }
+          else { state.feedback = 'Verificación: hay un caso en que tu programa no responde como se espera.'; state.feedbackType = 'warn'; }
+        }
+        render();
+        document.querySelector('.lx-verify')?.scrollIntoView({ block:'nearest', behavior:'smooth' });
+        return;
+      }
       else if (a === 'addRung')   { state.ladderNets.push(lxNet()); state.ldSel = { ni:state.ladderNets.length - 1 }; lxTouch(); render(); return; }
       if (a !== 'start') render();
       return;
@@ -2588,7 +2719,7 @@ function setupEvents() {
         }
         render(); break;
       }
-      case 'resetPlc': { const _rsc = SCENARIOS[state.scenario]; const _rn = _rsc.rungs || 3; state.compiled = false; state.plcRunning = false; state.plcMonitor = false; state.latch = false; state.systemEnabled = false; state.ladderNets = lxNets(_rn); state.cpuNets = null; state.ldDirty = false; state.ldSel = null; state.forced = {}; state.xrefTag = null; state.plcScanMode = false; state.scanCount = 0; state.ladderErrors = null; state.activeSlot = null; state.inputs = { start: false, stop: false }; state.hintIdx = -1; state.hintMsg = ''; state.timerET = 0; state.timerQ = false; delete state.ladderSave[state.scenario]; lxCommit(); lxForget(state.scenario); state.feedback = 'PLC reiniciado — programa borrado (Ctrl+Z para recuperarlo).'; state.feedbackType = 'ok'; render(); break; }
+      case 'resetPlc': { const _rsc = SCENARIOS[state.scenario]; const _rn = _rsc.rungs || 3; state.compiled = false; state.plcRunning = false; state.plcMonitor = false; state.latch = false; state.systemEnabled = false; state.ladderNets = lxNets(_rn); state.cpuNets = null; state.ldDirty = false; state.ldSel = null; state.forced = {}; state.xrefTag = null; state.plcScanMode = false; state.scanCount = 0; state.ladderErrors = null; state.activeSlot = null; state.inputs = { start: false, stop: false }; state.hintIdx = -1; state.hintMsg = ''; state.timerET = 0; state.timerQ = false; delete state.ladderSave[state.scenario]; state.verifyResult = null; lxCommit(); lxForget(state.scenario); state.feedback = 'PLC reiniciado — programa borrado (Ctrl+Z para recuperarlo).'; state.feedbackType = 'ok'; render(); break; }
       case 'newFault': {
         const sf = currentFaults();
         const keys = Object.keys(sf);
