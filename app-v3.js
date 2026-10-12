@@ -35,6 +35,7 @@ const state = {
   ldDirty: false,
   ldSel: null,
   verifyResult: null,
+  challenge: null,
   ladderSave: {},
   hintIdx: -1,
   hintMsg: '',
@@ -450,7 +451,7 @@ function updateLogic() {
     } else {
       // Imagen de proceso: M0.0 y Q0.x conservan su valor entre ciclos;
       // ( ) escribe el RLO en cada ciclo, S/R solo cuando el RLO es 1.
-      const m = lxScan(state.cpuNets || [], lxRuntimeMem(), lxRuntimeIn);
+      const m = lxCycle(state.cpuNets || [], lxRuntimeMem(), lxRuntimeIn);
       state.latch = m.M; state.pumpCommand = m.q['Q0.0']; state.q01 = m.q['Q0.1']; state.q02 = m.q['Q0.2'];
       state.lxMem.cv = m.cv; state.lxMem.pcu = m.pcu;
       for (const t of Object.keys(LX_BITS)) if (t in state.forced) lxWriteBit(t, state.forced[t]);
@@ -670,9 +671,103 @@ function lxFromLegacy(r) {
   return net;
 }
 const _lxTargets = {};
-function lxTargetNets(scenario) {
-  return _lxTargets[scenario] || (_lxTargets[scenario] = SCENARIOS[scenario].ladder.map(lxFromLegacy));
+function lxTargetNets(key) {
+  if (_lxTargets[key]) return _lxTargets[key];
+  const ch = lxChallenge(key);
+  return (_lxTargets[key] = ch ? ch.target() : SCENARIOS[key].ladder.map(lxFromLegacy));
 }
+
+// ── Desafíos de programación (además de la rutina básica de cada proceso) ──
+// target(): solución de referencia con el modelo de redes; compare: salidas que
+// revisa Verificar; inputOk: combinaciones de entradas físicamente posibles.
+const LX_CHALLENGES = {
+  conveyor: [{
+    key: 'count',
+    label: 'Conteo de piezas',
+    rungs: 6,
+    statement: 'La correa arranca con <b>MARCHA</b> (si el <b>SENSOR</b> indica paso libre) y se detiene con <b>PARADA</b>. Cuenta las piezas que pasan por <b>DETECCIÓN</b>: al llegar a <b>3</b>, la correa se detiene sola y se enciende el piloto <b>ÁMBAR (Q0.1)</b> de lote completo. <b>MARCHA</b> inicia un lote nuevo y pone el conteo a 0.',
+    compare: ['Q0.0', 'Q0.1'],
+    // Se arranca con la correa vacía: no se pulsa MARCHA mientras pasa una pieza.
+    inputOk: b => !(b[0] && b[3]),
+    target() {
+      const N = (items, coils) => { const n = lxNet(); n.logic = lxSer(items); n.coils = coils; return n; };
+      const ctu = lxCoil('CTU', 'C0'); ctu.pv = 3;
+      return [
+        N([lxCtc('I0.3', false, 'P')], [ctu]),
+        N([lxCtc('I0.0')], [lxCoil('R', 'C0')]),
+        N([lxCtc('I0.0'), lxCtc('I0.2')], [lxCoil('S', 'M0.0')]),
+        N([lxPar([lxSer([lxCtc('I0.1')]), lxSer([lxCtc('C0')])])], [lxCoil('R', 'M0.0')]),
+        N([lxCtc('M0.0')], [lxCoil('=', 'Q0.0')]),
+        N([lxCtc('C0')], [lxCoil('=', 'Q0.1')]),
+      ];
+    },
+    hints: [
+      'Usa la instrucción CTU sobre %C0 con PV = 3; su entrada es el sensor DETECCIÓN (I0.3). El CTU ya cuenta flancos de subida, así que un contacto NA basta (o un Flanco P, si prefieres dejarlo explícito).',
+      'El contacto %C0 se activa cuando el conteo llega a PV: úsalo para encender el piloto ÁMBAR (Q0.1).',
+      'Para detener la correa al completar el lote, pon un contacto %C0 en paralelo con PARADA en la red que hace Reset de la memoria del motor.',
+      'MARCHA debe poner el conteo a 0: una red con el contacto MARCHA y una bobina -(R)- sobre %C0. Ubícala antes de la red de parada, para que el lote nuevo arranque en el mismo ciclo.',
+      'El arranque es como en la rutina básica: MARCHA y SENSOR en serie hacen Set de M0.0, y M0.0 enciende el MOTOR (Q0.0).',
+    ],
+  }],
+};
+function lxProgKey() { return state.challenge ? `${state.scenario}:${state.challenge}` : state.scenario; }
+function lxChallenge(key = lxProgKey()) {
+  const [sc, ch] = key.split(':');
+  return ch ? (LX_CHALLENGES[sc] || []).find(c => c.key === ch) || null : null;
+}
+function lxDefaultRungs() { return lxChallenge()?.rungs || SCENARIOS[state.scenario].rungs || 3; }
+// Guarda en memoria el programa del proceso/desafío activo antes de cambiar.
+function lxStashProgram() {
+  state.ladderSave[lxProgKey()] = {
+    nets: lxClone(state.ladderNets),
+    cpuNets: state.cpuNets ? lxClone(state.cpuNets) : null,
+    dirty: state.ldDirty,
+    hintIdx: state.hintIdx, hintMsg: state.hintMsg, compiled: state.compiled,
+  };
+}
+// Carga el programa del proceso/desafío activo (memoria → navegador → vacío). Devuelve 'memory' | 'stored' | null.
+function lxLoadProgram() {
+  const key = lxProgKey();
+  const saved = state.ladderSave[key];
+  let from = null;
+  state.ldSel = null; state.ladderErrors = null;
+  if (saved) {
+    state.ladderNets = lxAdopt(saved.nets) || lxNets(lxDefaultRungs());
+    state.cpuNets = saved.cpuNets; state.ldDirty = saved.dirty;
+    state.hintIdx = saved.hintIdx; state.hintMsg = saved.hintMsg;
+    state.compiled = saved.compiled;
+    from = 'memory';
+  } else {
+    const stored = lxStoredNets(key);
+    state.ladderNets = stored || lxNets(lxDefaultRungs());
+    state.cpuNets = null; state.ldDirty = false; state.compiled = false;
+    state.hintIdx = -1; state.hintMsg = '';
+    from = stored ? 'stored' : null;
+  }
+  lxResetHistory();
+  return from;
+}
+function lxChallengeDoneKey(key = lxProgKey()) { return `challenge:${key}`; }
+
+function lxChallengeBar() {
+  const list = LX_CHALLENGES[state.scenario];
+  if (!list) return '';
+  const ch = lxChallenge();
+  const tab = (key, label) => {
+    const done = key && state.missions[lxChallengeDoneKey(`${state.scenario}:${key}`)];
+    return `<button class="lx-chal-tab${(state.challenge || '') === key ? ' lx-chal-on' : ''}" data-challenge="${key}">${label}${done ? ' <span class="lx-chal-done" title="Superado">✓</span>' : ''}</button>`;
+  };
+  return `<div class="lx-chal">
+    <div class="lx-chal-row">
+      <span class="lx-chal-lbl">Desafío</span>
+      ${tab('', 'Rutina básica')}${list.map(c => tab(c.key, c.label)).join('')}
+      <span class="lx-fav-spacer"></span>
+      <button class="tia-tb-btn" data-action="passPiece" title="Simula una pieza que pasa frente al sensor de detección (I0.3)">📦 Pasar pieza</button>
+    </div>
+    ${ch ? `<p class="lx-chal-txt">${ch.statement}</p>` : ''}
+  </div>`;
+}
+
 
 function lxWalk(node, fn) {
   fn(node);
@@ -777,6 +872,9 @@ function lxScan(nets, m, inVal) {
   }
   return m;
 }
+// Un ciclo de la app = 2 scans con las mismas entradas (en un PLC real cada pulsación
+// dura muchos scans); así el resultado no depende de detalles del orden de las redes.
+function lxCycle(nets, m, inVal) { lxScan(nets, m, inVal); return lxScan(nets, m, inVal); }
 function lxCtrPV(nets) {
   for (const n of nets || []) for (const o of n.coils) if (o.kind === 'CTU') return o.pv || 3;
   return 3;
@@ -965,7 +1063,7 @@ function builderLadder() {
     ${state.ldDirty && state.compiled ? `<span class="lx-dirty" title="El programa del editor difiere del cargado en la CPU">● Offline ≠ Online — compila para cargar</span>` : ''}
   </div>`;
 
-  const hints = state.scenario ? buildHints(state.scenario) : [];
+  const hints = buildHints(lxProgKey());
   const allHintsShown = state.hintIdx >= hints.length - 1;
   const hintSection = `<div class="ld-hint-row">${!allHintsShown ? `<button class="btn ld-hint-btn" data-action="hint">Pedir pista</button>` : `<span class="ld-hint-btn-done">Sin más pistas</span>`}${state.hintMsg ? `<div class="ld-hint-box"><span class="ld-hint-icon">💡</span> ${state.hintMsg}</div>` : ''}</div>`;
 
@@ -976,6 +1074,7 @@ function builderLadder() {
   </div>` : '';
 
   return `<div class="ld-builder lx-builder">
+${lxChallengeBar()}
 ${favBar}
 <p class="ld-hint">Selecciona un contacto o un tramo de cable y pulsa una instrucción (o <kbd>F2</kbd> NA · <kbd>F3</kbd> NC · <kbd>F7</kbd> bobina · <kbd>Shift</kbd>+<kbd>F8</kbd> rama · <kbd>Supr</kbd> borrar · <kbd>←</kbd><kbd>→</kbd> moverse · <kbd>Ctrl</kbd>+<kbd>Z</kbd> deshacer). También puedes arrastrar instrucciones y elementos. El programa se guarda solo en este navegador.</p>
 <div class="ld-canvas lx-canvas${lxMonitoring() ? ' lx-monitor' : ''}" tabindex="0">
@@ -1035,7 +1134,7 @@ function lxPersist() {
   try {
     const d = lxReadStore();
     d.programs = d.programs || {};
-    d.programs[state.scenario] = state.ladderNets;
+    d.programs[lxProgKey()] = state.ladderNets;
     d.tagNames = state.tagNames;
     localStorage.setItem(LX_STORE, JSON.stringify(d));
   } catch { /* almacenamiento no disponible: se sigue trabajando en memoria */ }
@@ -1166,13 +1265,13 @@ function lxSimTick(nets, st, inp, ptSteps, pv) {
   const m = { ...st, q:{ ...st.q }, e:{ ...st.e }, eo:{ ...st.eo }, pv, cvMax:pv };
   const io = { 'I0.0':inp[0], 'I0.1':inp[1], 'I0.2':inp[2], 'I0.3':inp[3] };
   const inVal = t => io[t];
-  // Igual que el ciclo real: scan, actualizar TON, scan.
-  lxScan(nets, m, inVal);
+  // Igual que el ciclo real: scans, actualizar TON, scans.
+  lxCycle(nets, m, inVal);
   const ton = nets.find(n => n.coils.some(o => coilKey(o) === 'T0.0/TON'));
   if (ton) {
     if (lxEvalWith(ton.logic, m, inVal)) { m.k = Math.min(m.k + 1, ptSteps); m.TQ = m.k >= ptSteps; }
     else { m.k = 0; m.TQ = false; }
-    lxScan(nets, m, inVal);
+    lxCycle(nets, m, inVal);
   }
   m.Q = m.q['Q0.0'];
   return m;
@@ -1180,14 +1279,17 @@ function lxSimTick(nets, st, inp, ptSteps, pv) {
 
 function lxVerify() {
   const sc = SCENARIOS[state.scenario];
-  const target = lxTargetNets(state.scenario);
+  const ch = lxChallenge();
+  const target = lxTargetNets(lxProgKey());
   const mine = lxClone(state.ladderNets);
+  const compare = ch?.compare || ['Q0.0'];
+  const outs = x => Object.fromEntries(compare.map(t => [t, x.q[t]]));
   const ptSteps = Math.max(1, Math.ceil((sc.timerPT || state.timerPT) / LX_SCAN_S - 1e-9));
   // Combinaciones de entradas posibles: el sensor no puede estar bajo y alto a la vez.
   const combos = [];
   for (let m = 0; m < 16; m++) {
     const b = [!!(m & 1), !!(m & 2), !!(m & 4), !!(m & 8)];
-    if (!(b[2] && b[3])) combos.push(b);
+    if (!(b[2] && b[3]) && (!ch?.inputOk || ch.inputOk(b))) combos.push(b);
   }
   combos.sort((x, y) => x.filter(Boolean).length - y.filter(Boolean).length);
   // El contador se satura en PV: más pulsos no cambian C0 hasta el reset (espacio de estados finito).
@@ -1205,16 +1307,16 @@ function lxVerify() {
       for (const inp of list) {
         trans++;
         const na = lxSimTick(target, a, inp, ptSteps, pvT), nb = lxSimTick(mine, b, inp, ptSteps, pvM);
-        if (na.Q !== nb.Q) {
-          const path = [{ inp, exp:na.Q, got:nb.Q }];
-          for (let j = i; nodes[j].prev >= 0; j = nodes[j].prev) path.unshift({ inp:nodes[j].inp, exp:nodes[j].a.Q, got:nodes[j].b.Q });
-          return { ok:false, steps:path };
+        if (compare.some(t => na.q[t] !== nb.q[t])) {
+          const path = [{ inp, exp:outs(na), got:outs(nb) }];
+          for (let j = i; nodes[j].prev >= 0; j = nodes[j].prev) path.unshift({ inp:nodes[j].inp, exp:outs(nodes[j].a), got:outs(nodes[j].b) });
+          return { ok:false, steps:path, compare };
         }
         const kk = key(na, nb);
         if (!seen.has(kk)) { seen.add(kk); nodes.push({ a:na, b:nb, prev:i, inp }); }
       }
     }
-    return { ok:true, states:seen.size, trans };
+    return { ok:true, states:seen.size, trans, compare };
   };
   // Primero sin pulsar MARCHA y PARADA a la vez (contraejemplos más claros);
   // si todo coincide, se prueba también ese caso (prioridad de la parada).
@@ -1228,31 +1330,33 @@ function lxVerify() {
 function lxVerifyHtml() {
   const v = state.verifyResult;
   if (!v) return '';
-  const sc = SCENARIOS[state.scenario];
-  const out = lxTagMeta('Q0.0').sym || sc.io.q00;
+  const name = t => lxTagMeta(t).sym || t;
   if (v.ok) return `<div class="lx-verify lx-verify-ok">
     <div class="lx-verify-hd">✔ Verificación superada</div>
-    <p>Tu programa responde igual que la solución en todas las situaciones posibles: se probaron ${v.trans} combinaciones de entradas sobre ${v.states} estados internos.</p>
+    <p>Tu programa responde igual que la solución en todas las situaciones posibles: se probaron ${v.trans} combinaciones de entradas sobre ${v.states} estados internos${v.compare.length > 1 ? ` (salidas revisadas: ${v.compare.map(name).join(', ')})` : ''}.</p>
   </div>`;
   const tags = ['I0.0','I0.1','I0.2','I0.3'];
-  const inpLbl = inp => { const on = tags.filter((t, i) => inp[i]).map(t => `<code>${lxTagMeta(t).sym || t}</code>`); return on.length ? on.join(' + ') : '<span class="lx-verify-none">ninguna</span>'; };
+  const inpLbl = inp => { const on = tags.filter((t, i) => inp[i]).map(t => `<code>${name(t)}</code>`); return on.length ? on.join(' + ') : '<span class="lx-verify-none">ninguna</span>'; };
+  const same = (x, y) => JSON.stringify(x) === JSON.stringify(y);
   // Agrupa pasos consecutivos iguales (p. ej. esperar a que corra el TON).
   const rows = [];
   v.steps.forEach((s, i) => {
     const last = rows[rows.length - 1];
-    const same = last && i < v.steps.length - 1 && last.inp.join() === s.inp.join() && last.exp === s.exp && last.got === s.got;
-    if (same) last.n++; else rows.push({ ...s, n:1, from:i + 1 });
+    if (last && i < v.steps.length - 1 && last.inp.join() === s.inp.join() && same(last.exp, s.exp) && same(last.got, s.got)) last.n++;
+    else rows.push({ ...s, n:1, from:i + 1 });
   });
   const onOff = q => q ? '<b class="lx-q-on">1 · ON</b>' : '<b class="lx-q-off">0 · OFF</b>';
   const fin = v.steps[v.steps.length - 1];
+  const bad = v.compare.filter(t => fin.exp[t] !== fin.got[t]);
+  const msg = bad.map(t => `<b>${name(t)}</b> debería estar <b>${fin.exp[t] ? 'ON' : 'OFF'}</b>, pero en tu programa está <b>${fin.got[t] ? 'ON' : 'OFF'}</b>`).join('; ');
   return `<div class="lx-verify lx-verify-bad">
     <div class="lx-verify-hd">✖ Tu programa no se comporta como se espera</div>
-    ${v.bothButtons ? `<p>Solo falla si se pulsan <b>${lxTagMeta('I0.0').sym || 'I0.0'}</b> y <b>${lxTagMeta('I0.1').sym || 'I0.1'}</b> a la vez: la parada debe tener prioridad. Revisa el orden de las redes o usa un contacto NC de parada.</p>` : ''}
-    <p>Con esta secuencia de entradas, <b>${out}</b> debería quedar <b>${fin.exp ? 'encendida' : 'apagada'}</b>, pero tu programa la deja <b>${fin.got ? 'encendida' : 'apagada'}</b>.</p>
-    <table class="lx-verify-tbl"><thead><tr><th>Ciclo</th><th>Entradas activas</th><th>${out} esperada</th><th>Tu ${out}</th></tr></thead><tbody>
-    ${rows.map((r, i) => `<tr class="${i === rows.length - 1 ? 'lx-verify-fail' : ''}"><td>${r.n > 1 ? `${r.from}–${r.from + r.n - 1} <small>(×${r.n}, ≈${(r.n * LX_SCAN_S).toFixed(1)} s)</small>` : r.from}</td><td>${inpLbl(r.inp)}</td><td>${onOff(r.exp)}</td><td>${onOff(r.got)}</td></tr>`).join('')}
+    ${v.bothButtons ? `<p>Solo falla si se pulsan <b>${name('I0.0')}</b> y <b>${name('I0.1')}</b> a la vez: la parada debe tener prioridad. Revisa el orden de las redes o usa un contacto NC de parada.</p>` : ''}
+    <p>Con esta secuencia de entradas, ${msg}.</p>
+    <table class="lx-verify-tbl"><thead><tr><th>Ciclo</th><th>Entradas activas</th>${v.compare.map(t => `<th>${name(t)} esperada</th><th>Tu ${name(t)}</th>`).join('')}</tr></thead><tbody>
+    ${rows.map((r, i) => `<tr class="${i === rows.length - 1 ? 'lx-verify-fail' : ''}"><td>${r.n > 1 ? `${r.from}–${r.from + r.n - 1} <small>(×${r.n}, ≈${(r.n * LX_SCAN_S).toFixed(1)} s)</small>` : r.from}</td><td>${inpLbl(r.inp)}</td>${v.compare.map(t => `<td>${onOff(r.exp[t])}</td><td>${onOff(r.got[t])}</td>`).join('')}</tr>`).join('')}
     </tbody></table>
-    <p class="lx-verify-tip">Cada fila es un ciclo de scan (${LX_SCAN_S} s). Puedes reproducir el caso con <b>⏩ Paso</b> y la tabla de forzado.</p>
+    <p class="lx-verify-tip">Cada fila es un ciclo de ${LX_SCAN_S} s. Puedes reproducir el caso con <b>⏩ Paso</b> y la tabla de forzado.</p>
   </div>`;
 }
 
@@ -1295,8 +1399,10 @@ function lxCompile() {
   return { ok: !msgs.length, msgs, warns, ids };
 }
 
-function buildHints(scenario) {
-  const sc = SCENARIOS[scenario];
+function buildHints(key) {
+  const ch = lxChallenge(key);
+  if (ch) return ch.hints;
+  const sc = SCENARIOS[key];
   const io = sc.io;
   const structLabels = { series1:'un contacto seguido de la bobina', series2:'dos contactos en serie antes de la bobina', parallel:'dos contactos en paralelo (abre una rama) antes de la bobina' };
   const tagName = tag => {
@@ -1329,7 +1435,7 @@ function evaluateContact(tag) {
 }
 
 function ladderSvg() {
-  const nets = state.compiled && state.cpuNets ? state.cpuNets : lxTargetNets(state.scenario);
+  const nets = state.compiled && state.cpuNets ? state.cpuNets : lxTargetNets(lxProgKey());
   return `<div class="lx-live">${lxNetsHtml(nets, { flowOf: lxFlow })}</div>`;
 }
 
@@ -2625,7 +2731,7 @@ function setupEvents() {
       else if (a === 'toggleMission') { state.missionOpen = !state.missionOpen; render(); return; }
       else if (a === 'alarm') state.alarmAck = true;
       else if (a === 'hint') {
-        const hints = buildHints(state.scenario);
+        const hints = buildHints(lxProgKey());
         state.hintIdx = Math.min(state.hintIdx + 1, hints.length - 1);
         state.hintMsg = hints[state.hintIdx];
         render(); return;
@@ -2680,6 +2786,12 @@ function setupEvents() {
         state.feedbackType = 'ok';
         render(); return;
       }
+      else if (a === 'passPiece') {
+        // Una pieza frente al fotoeléctrico: la señal sube sobre P2 (DETECCIÓN) y vuelve a 0.
+        state.level = 90; render();
+        setTimeout(() => { state.level = 0; render(); }, 1400);
+        return;
+      }
       else if (a === 'plcVerify') {
         const res = lxCompile();
         if (!res.ok) {
@@ -2688,7 +2800,13 @@ function setupEvents() {
         } else {
           state.ladderErrors = res.warns.length ? res : null;
           state.verifyResult = lxVerify();
-          if (state.verifyResult.ok) { state.missions.program = true; state.feedback = 'Verificación superada ✓ — el programa cumple la rutina de control.'; state.feedbackType = 'ok'; }
+          const ch = lxChallenge();
+          if (state.verifyResult.ok && ch) {
+            const dk = lxChallengeDoneKey();
+            if (!state.missions[dk]) { state.missions[dk] = true; _missionLabels[dk] = `Desafío «${ch.label}» superado`; showCelebration(dk); saveProgress(); }
+            state.feedback = `Desafío «${ch.label}» superado ✓`; state.feedbackType = 'ok';
+          }
+          else if (state.verifyResult.ok) { state.missions.program = true; state.feedback = 'Verificación superada ✓ — el programa cumple la rutina de control.'; state.feedbackType = 'ok'; }
           else { state.feedback = 'Verificación: hay un caso en que tu programa no responde como se espera.'; state.feedbackType = 'warn'; }
         }
         render();
@@ -2718,20 +2836,28 @@ function setupEvents() {
       render(); return;
     }
 
+    const chalEl = e.target.closest('[data-challenge]');
+    if (chalEl) {
+      const next = chalEl.dataset.challenge || null;
+      if (next === state.challenge) return;
+      lxStashProgram();
+      state.challenge = next;
+      state.plcRunning = false; state.plcMonitor = false; state.plcScanMode = false; state.latch = false; lxResetMem();
+      const from = lxLoadProgram();
+      const ch = lxChallenge();
+      state.feedback = `${ch ? `Desafío: ${ch.label}` : 'Rutina básica'}${from ? ' · programa recuperado — compílalo para cargarlo.' : ''}`;
+      state.feedbackType = 'ok';
+      render(); return;
+    }
+
     const scSwitchEl = e.target.closest('[data-scenario]');
     if (scSwitchEl) {
       const key = scSwitchEl.dataset.scenario;
       if (key === state.scenario) return;
-      // Save current ladder state
-      state.ladderSave[state.scenario] = {
-        nets: lxClone(state.ladderNets),
-        cpuNets: state.cpuNets ? lxClone(state.cpuNets) : null,
-        dirty: state.ldDirty,
-        hintIdx: state.hintIdx, hintMsg: state.hintMsg, compiled: state.compiled,
-      };
+      lxStashProgram();
       const sc = SCENARIOS[key];
-      const rungs = sc.rungs || 3;
       state.scenario = key;
+      state.challenge = null;
       state.level = sc.defaultVar;
       state.lowLevel = sc.defaultLow;
       state.highLevel = sc.defaultHigh;
@@ -2743,27 +2869,10 @@ function setupEvents() {
       state.timerET = 0; state.timerQ = false;
       state.timerPT = sc.timerPT || 5;
       state.trace = Array.from({length:44},()=>({level:0,out:0}));
-      // Restore ladder if saved, otherwise clear
-      const saved = state.ladderSave[key];
-      if (saved) {
-        state.ladderNets = lxAdopt(saved.nets) || lxNets(rungs);
-        state.cpuNets = saved.cpuNets;
-        state.ldDirty = saved.dirty;
-        state.ldSel = null;
-        state.hintIdx = saved.hintIdx; state.hintMsg = saved.hintMsg;
-        state.compiled = saved.compiled;
-        state.ladderErrors = null;
-        state.feedback = `Proceso: ${sc.label} · Programa restaurado.`;
-      } else {
-        const stored = lxStoredNets(key);
-        state.ladderNets = stored || lxNets(rungs);
-        state.cpuNets = null; state.ldDirty = false; state.ldSel = null;
-        state.ladderErrors = null;
-        state.compiled = false;
-        state.hintIdx = -1; state.hintMsg = '';
-        state.feedback = stored ? `Proceso: ${sc.label} · Programa guardado recuperado — compílalo para cargarlo.` : `Proceso: ${sc.label} · Configura el relé y compila el programa.`;
-      }
-      lxResetHistory();
+      const from = lxLoadProgram();
+      state.feedback = from === 'memory' ? `Proceso: ${sc.label} · Programa restaurado.`
+        : from === 'stored' ? `Proceso: ${sc.label} · Programa guardado recuperado — compílalo para cargarlo.`
+        : `Proceso: ${sc.label} · Configura el relé y compila el programa.`;
       state.feedbackType = 'ok';
       render(); return;
     }
@@ -2814,7 +2923,7 @@ function setupEvents() {
         }
         render(); break;
       }
-      case 'resetPlc': { const _rsc = SCENARIOS[state.scenario]; const _rn = _rsc.rungs || 3; state.compiled = false; state.plcRunning = false; state.plcMonitor = false; state.latch = false; state.systemEnabled = false; state.ladderNets = lxNets(_rn); state.cpuNets = null; state.ldDirty = false; state.ldSel = null; state.forced = {}; state.xrefTag = null; state.plcScanMode = false; state.scanCount = 0; state.ladderErrors = null; state.inputs = { start: false, stop: false }; state.hintIdx = -1; state.hintMsg = ''; state.timerET = 0; state.timerQ = false; lxResetMem(); delete state.ladderSave[state.scenario]; state.verifyResult = null; lxCommit(); lxForget(state.scenario); state.feedback = 'PLC reiniciado — programa borrado (Ctrl+Z para recuperarlo).'; state.feedbackType = 'ok'; render(); break; }
+      case 'resetPlc': { const _rn = lxDefaultRungs(); state.compiled = false; state.plcRunning = false; state.plcMonitor = false; state.latch = false; state.systemEnabled = false; state.ladderNets = lxNets(_rn); state.cpuNets = null; state.ldDirty = false; state.ldSel = null; state.forced = {}; state.xrefTag = null; state.plcScanMode = false; state.scanCount = 0; state.ladderErrors = null; state.inputs = { start: false, stop: false }; state.hintIdx = -1; state.hintMsg = ''; state.timerET = 0; state.timerQ = false; lxResetMem(); delete state.ladderSave[lxProgKey()]; state.verifyResult = null; lxCommit(); lxForget(lxProgKey()); state.feedback = 'PLC reiniciado — programa borrado (Ctrl+Z para recuperarlo).'; state.feedbackType = 'ok'; render(); break; }
       case 'newFault': {
         const sf = currentFaults();
         const keys = Object.keys(sf);
@@ -2910,7 +3019,7 @@ setInterval(()=>{
 (() => {
   const d = lxReadStore();
   if (d.tagNames && typeof d.tagNames === 'object') state.tagNames = d.tagNames;
-  state.ladderNets = lxStoredNets(state.scenario) || lxNets(SCENARIOS[state.scenario].rungs || 3);
+  state.ladderNets = lxStoredNets(lxProgKey()) || lxNets(lxDefaultRungs());
   lxResetHistory();
 })();
 setupEvents();

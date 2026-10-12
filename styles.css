@@ -896,3 +896,14 @@ label { display: grid; gap: 6px; color: #334840; font-weight: 700; font-size: .8
 .lx-box input.lx-pv { width: 40px; height: auto; margin: 0 0 0 2px; font: 700 .66rem/1.2 ui-monospace, monospace; color: var(--ink); border: 1px solid var(--line); border-radius: 3px; padding: 0 2px; background: var(--panel); }
 .lx-box input.lx-pv:focus { outline: none; border-color: var(--lx-sel-bd); }
 .sym-cv { color: var(--muted); font-family: ui-monospace, monospace; }
+
+/* Desafíos de programación */
+.lx-chal { border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 4px 6px; }
+.lx-chal-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.lx-chal-lbl { font: 700 .62rem/1 var(--font, inherit); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-right: 4px; }
+.lx-chal-tab { border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 999px; padding: 3px 10px; font-size: .72rem; font-weight: 700; }
+.lx-chal-tab:hover { border-color: var(--green-700); }
+.lx-chal-on { background: var(--green-800); border-color: var(--green-800); color: #fff; }
+.lx-chal-done { color: var(--ok); font-weight: 900; }
+.lx-chal-on .lx-chal-done { color: #8fe5c2; }
+.lx-chal-txt { margin: 6px 4px 2px; font-size: .78rem; line-height: 1.5; color: var(--ink); }
