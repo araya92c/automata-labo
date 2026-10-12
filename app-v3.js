@@ -39,6 +39,7 @@ const state = {
   exOpen: false,
   exConfirm: null,
   exNote: null,
+  exSolutionPrint: null,
   ladderSave: {},
   hintIdx: -1,
   hintMsg: '',
@@ -792,8 +793,56 @@ function lxExampleAvailable(ex) {
   });
 }
 function lxProgramHasContent() { return state.ladderNets.some(n => n.logic.items.length || n.coils.length); }
+// ── Solución de referencia como ejemplo ───────────────────────
+// Es la misma que usa Verificar; se anota con títulos y comentarios generados
+// a partir de la lógica de cada red.
+const LX_SOLUTION_TEST = {
+  level: () => `Pulsa <b>▶ Arrancar</b> y activa <b>Simular proceso</b>. Con el nivel bajo P1 (${state.lowLevel} %), pulsa <b>START</b>: la bomba llena el estanque y se detiene sola al llegar a P2 (${state.highLevel} %). <b>STOP</b> la detiene antes.`,
+  temperature: () => `Pulsa <b>▶ Arrancar</b> y activa <b>Simular proceso</b>. Cuando la temperatura supere P2 (${state.highLevel} %), pulsa <b>START</b>: el ventilador enfría hasta P1 (${state.lowLevel} %) y se detiene solo.`,
+  conveyor: () => `Pulsa <b>▶ Arrancar</b>. Con el sensor libre (${lxSlider()} bajo P1), pulsa <b>START</b>: la correa avanza hasta que pulses <b>STOP</b>.`,
+  sequence: () => `Pulsa <b>▶ Arrancar</b> y activa <b>Simular proceso</b>. Pulsa <b>START</b>: la bomba llena durante ${SCENARIOS[state.scenario].timerPT || state.timerPT} s y se detiene sola cuando termina el temporizador.`,
+  'conveyor:count': () => `Pulsa <b>▶ Arrancar</b> y <b>START</b>; luego <b>📦 Pasar pieza</b> 3 veces: la correa se detiene y se enciende el ámbar. <b>START</b> inicia otro lote.`,
+};
+function lxDescribe(node) {
+  const nm = t => lxTagMeta(t).sym || t;
+  if (node.t === 'C') return node.edge ? `${nm(node.tag)} (flanco ${node.edge})` : node.nc ? `${nm(node.tag)} = 0` : nm(node.tag);
+  if (node.t === 'S') return node.items.map(lxDescribe).join(' y ') || 'siempre';
+  return `(${node.branches.map(lxDescribe).join(' o ')})`;
+}
+function lxAnnotate(nets) {
+  const nm = t => lxTagMeta(t).sym || t;
+  nets.forEach(net => {
+    // Sin paréntesis externos cuando toda la red es un único paralelo.
+    const single = net.logic.items.length === 1 && net.logic.items[0].t === 'P';
+    const when = single ? net.logic.items[0].branches.map(lxDescribe).join(' o ') : lxDescribe(net.logic);
+    const o = net.coils[0];
+    if (!o) return;
+    net.title = o.kind === 'S' ? `Activar ${nm(o.tag)}` : o.kind === 'R' ? `${o.tag === 'C0' ? 'Reiniciar' : 'Desactivar'} ${nm(o.tag)}` : o.kind === 'TON' ? 'Temporizador' : o.kind === 'CTU' ? 'Contador' : `Salida ${nm(o.tag)}`;
+    net.comment = o.kind === 'S' ? `Set de %${o.tag} cuando: ${when}.`
+      : o.kind === 'R' ? (o.tag === 'C0' ? `Pone a 0 el conteo de %C0 cuando: ${when}.` : `Reset de %${o.tag} cuando: ${when}.`)
+      : o.kind === 'TON' ? `El TON cuenta mientras: ${when}.`
+      : o.kind === 'CTU' ? `Suma 1 cada vez que se activa ${when}; al llegar a PV = ${o.pv || 3}, %C0 pasa a 1.`
+      : `%${o.tag} = ${when}.`;
+  });
+  return nets;
+}
+// Huella de la lógica (sin títulos ni comentarios) para reconocer la solución sin modificar.
+function lxLogicPrint(nets) { return JSON.stringify(nets.map(n => [n.logic, n.coils])); }
+function lxSolutionExample() {
+  const key = lxProgKey();
+  const ch = lxChallenge();
+  const label = ch ? ch.label : SCENARIOS[state.scenario].label;
+  return {
+    key: 'solution', solution: true, title: `Solución: ${label}`, concept: 'Solución del ejercicio',
+    desc: () => `El programa de referencia ${ch ? 'del desafío' : 'de este proceso'}, con cada red comentada. Úsalo para probar el funcionamiento esperado o comparar con tu programa. Verificar lo aprueba, pero <b>no completa la misión</b> si no lo modificas.`,
+    test: () => (LX_SOLUTION_TEST[key] || LX_SOLUTION_TEST[state.scenario])(),
+    build: () => lxAnnotate(lxClone(lxTargetNets(key))),
+  };
+}
+function lxExampleList() { return [lxSolutionExample(), ...LX_EXAMPLES]; }
+
 function lxLoadExample(key) {
-  const ex = LX_EXAMPLES.find(x => x.key === key);
+  const ex = lxExampleList().find(x => x.key === key);
   if (!ex || !lxExampleAvailable(ex)) return;
   state.ladderNets = ex.build();
   state.ldSel = null;
@@ -802,19 +851,20 @@ function lxLoadExample(key) {
   state.cpuNets = lxClone(state.ladderNets); state.ldDirty = false; lxResetMem();
   state.compiled = true; state.plcRunning = false; state.plcScanMode = false; state.latch = false;
   state.exOpen = false; state.exConfirm = null; state.exNote = key;
+  state.exSolutionPrint = ex.solution ? lxLogicPrint(state.ladderNets) : null;
   state.feedback = `Ejemplo «${ex.title}» cargado y compilado — pulsa ▶ Arrancar para probarlo.`; state.feedbackType = 'ok';
 }
 function lxExamplesHtml() {
   let note = '';
-  const cur = state.exNote && LX_EXAMPLES.find(x => x.key === state.exNote);
+  const cur = state.exNote && lxExampleList().find(x => x.key === state.exNote);
   if (cur) note = `<div class="lx-exnote"><div class="lx-exnote-hd">▶ Cómo probar «${cur.title}»<button class="lx-net-btn" data-ex-note-close title="Cerrar">✕</button></div><p>${cur.test()}</p></div>`;
   if (!state.exOpen) return note;
-  const list = LX_EXAMPLES.filter(lxExampleAvailable);
+  const list = lxExampleList().filter(lxExampleAvailable);
   const has = lxProgramHasContent();
   return `<div class="lx-ex">
     <div class="lx-ex-hd">📂 Programas de ejemplo <span>Se cargan ya compilados; pulsa ▶ Arrancar para probarlos.</span><button class="lx-net-btn" data-action="exToggle" title="Cerrar">✕</button></div>
-    <div class="lx-ex-grid">${list.map(ex => `<div class="lx-ex-card">
-      <div class="lx-ex-t">${ex.title}</div><div class="lx-ex-c">${ex.concept}</div>
+    <div class="lx-ex-grid">${list.map(ex => `<div class="lx-ex-card${ex.solution ? ' lx-ex-sol' : ''}">
+      <div class="lx-ex-t">${ex.solution ? '<span class="lx-ex-badge">Solución</span> ' : ''}${ex.title}</div><div class="lx-ex-c">${ex.concept}</div>
       <p>${ex.desc()}</p>
       ${state.exConfirm === ex.key
         ? `<div class="lx-ex-confirm">Reemplaza tu programa actual (puedes recuperarlo con Ctrl+Z). <button class="btn primary" data-ex-load="${ex.key}" data-ex-sure="1">Sí, cargar</button> <button class="btn" data-ex-cancel>Cancelar</button></div>`
@@ -841,7 +891,7 @@ function lxStashProgram() {
 // Carga el programa del proceso/desafío activo (memoria → navegador → vacío). Devuelve 'memory' | 'stored' | null.
 function lxLoadProgram() {
   const key = lxProgKey();
-  state.exNote = null; state.exConfirm = null;
+  state.exNote = null; state.exConfirm = null; state.exSolutionPrint = null;
   const saved = state.ladderSave[key];
   let from = null;
   state.ldSel = null; state.ladderErrors = null;
@@ -1449,7 +1499,8 @@ function lxVerifyHtml() {
   if (!v) return '';
   const name = t => lxTagMeta(t).sym || t;
   if (v.ok) return `<div class="lx-verify lx-verify-ok">
-    <div class="lx-verify-hd">✔ Verificación superada</div>
+    <div class="lx-verify-hd">✔ Verificación superada${v.fromSolution ? ' — solución de ejemplo' : ''}</div>
+    ${v.fromSolution ? '<p><b>Este es el programa de ejemplo tal como se cargó, así que no cuenta para la misión.</b> Escríbelo tú (o modifícalo) y vuelve a verificar.</p>' : ''}
     <p>Tu programa responde igual que la solución en todas las situaciones posibles: se probaron ${v.trans} combinaciones de entradas sobre ${v.states} estados internos${v.compare.length > 1 ? ` (salidas revisadas: ${v.compare.map(name).join(', ')})` : ''}.</p>
   </div>`;
   const tags = ['I0.0','I0.1','I0.2','I0.3'];
@@ -2919,7 +2970,12 @@ function setupEvents() {
           state.ladderErrors = res.warns.length ? res : null;
           state.verifyResult = lxVerify();
           const ch = lxChallenge();
-          if (state.verifyResult.ok && ch) {
+          const asLoaded = state.verifyResult.ok && state.exSolutionPrint && lxLogicPrint(state.ladderNets) === state.exSolutionPrint;
+          if (asLoaded) {
+            state.verifyResult.fromSolution = true;
+            state.feedback = 'Es la solución de ejemplo sin cambios: escribe o modifica tú el programa para completar la misión.'; state.feedbackType = 'warn';
+          }
+          else if (state.verifyResult.ok && ch) {
             const dk = lxChallengeDoneKey();
             if (!state.missions[dk]) { state.missions[dk] = true; _missionLabels[dk] = `Desafío «${ch.label}» superado`; showCelebration(dk); saveProgress(); }
             state.feedback = `Desafío «${ch.label}» superado ✓`; state.feedbackType = 'ok';
@@ -3050,7 +3106,7 @@ function setupEvents() {
         }
         render(); break;
       }
-      case 'resetPlc': { const _rn = lxDefaultRungs(); state.compiled = false; state.plcRunning = false; state.plcMonitor = false; state.latch = false; state.systemEnabled = false; state.ladderNets = lxNets(_rn); state.cpuNets = null; state.ldDirty = false; state.ldSel = null; state.forced = {}; state.xrefTag = null; state.plcScanMode = false; state.scanCount = 0; state.ladderErrors = null; state.inputs = { start: false, stop: false }; state.hintIdx = -1; state.hintMsg = ''; state.timerET = 0; state.timerQ = false; lxResetMem(); delete state.ladderSave[lxProgKey()]; state.verifyResult = null; state.exNote = null; lxCommit(); lxForget(lxProgKey()); state.feedback = 'PLC reiniciado — programa borrado (Ctrl+Z para recuperarlo).'; state.feedbackType = 'ok'; render(); break; }
+      case 'resetPlc': { const _rn = lxDefaultRungs(); state.compiled = false; state.plcRunning = false; state.plcMonitor = false; state.latch = false; state.systemEnabled = false; state.ladderNets = lxNets(_rn); state.cpuNets = null; state.ldDirty = false; state.ldSel = null; state.forced = {}; state.xrefTag = null; state.plcScanMode = false; state.scanCount = 0; state.ladderErrors = null; state.inputs = { start: false, stop: false }; state.hintIdx = -1; state.hintMsg = ''; state.timerET = 0; state.timerQ = false; lxResetMem(); delete state.ladderSave[lxProgKey()]; state.verifyResult = null; state.exNote = null; state.exSolutionPrint = null; lxCommit(); lxForget(lxProgKey()); state.feedback = 'PLC reiniciado — programa borrado (Ctrl+Z para recuperarlo).'; state.feedbackType = 'ok'; render(); break; }
       case 'newFault': {
         const sf = currentFaults();
         const keys = Object.keys(sf);
